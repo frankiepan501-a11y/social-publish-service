@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -5,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app.config import Settings
 from app.generation import (
     build_update_fields,
     fallback_generation,
@@ -359,6 +361,44 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertEqual(kwargs["status"], "success")
         self.assertIn('"selected": 0', kwargs["output_summary"])
         self.assertIn("POST /generate/scan", kwargs["replay_command"])
+
+    def test_write_log_respects_dry_run_log_gate(self):
+        settings = Settings(feishu_app_id="app", feishu_app_secret="secret", dry_run_write_logs=False)
+        feishu = AsyncMock()
+        with patch.object(main_module, "_feishu", return_value=feishu):
+            asyncio.run(
+                main_module._write_log(
+                    settings,
+                    run_id="genv1-test",
+                    record_id="rec_test",
+                    node="generate/brief",
+                    status="dry-run",
+                    input_hash="hash",
+                    output_summary="summary",
+                    decision_reason="generated",
+                    mode="dry-run",
+                )
+            )
+        feishu.append_run_log.assert_not_awaited()
+
+    def test_write_log_keeps_commit_audit(self):
+        settings = Settings(feishu_app_id="app", feishu_app_secret="secret", dry_run_write_logs=False)
+        feishu = AsyncMock()
+        with patch.object(main_module, "_feishu", return_value=feishu):
+            asyncio.run(
+                main_module._write_log(
+                    settings,
+                    run_id="spv1-test",
+                    record_id="rec_test",
+                    node="publish/commit",
+                    status="blocked",
+                    input_hash="hash",
+                    output_summary="summary",
+                    decision_reason="COMMIT_DISABLED",
+                    mode="commit",
+                )
+            )
+        feishu.append_run_log.assert_awaited_once()
 
     def test_generation_replay_routes_to_generate_dry_run(self):
         client = TestClient(app)

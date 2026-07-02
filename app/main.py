@@ -156,6 +156,8 @@ async def _load_recent_records(req: PublishRequest, settings: Settings) -> list[
 
 
 async def _write_log(settings: Settings, **kwargs) -> None:
+    if kwargs.get("mode") == "dry-run" and not settings.dry_run_write_logs:
+        return
     client = _feishu(settings)
     if client is None:
         return
