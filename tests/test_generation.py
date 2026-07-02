@@ -9,6 +9,7 @@ from app.generation import (
     build_update_fields,
     fallback_generation,
     generation_candidate_reason,
+    parse_ai_json,
     required_generation_missing,
     validate_generation_payload,
 )
@@ -82,6 +83,26 @@ class GenerationRulesTest(unittest.TestCase):
         issues = validate_generation_payload(payload)
         self.assertIn("IMAGE_PROMPT_SAFETY_GUARD_MISSING", issues)
         self.assertIn("IMAGE_PROMPT_FORBIDDEN_RENDER_INSTRUCTION", issues)
+
+    def test_parse_ai_json_hardens_missing_image_prompt_guards(self):
+        payload = parse_ai_json(
+            """
+            {
+              "brief": "- Brief",
+              "hook_hypothesis": "Test a setup hook.",
+              "caption_en": "Make your setup cleaner with a compact charging dock.",
+              "hashtags_en": "#GamingSetup #DeskSetup #SwitchAccessories",
+              "caption_cn_note": "围绕场景和保存动机写。",
+              "image_prompt": "Bright ecommerce product photo on a clean gaming desk",
+              "publish_checklist": "确认素材\\n确认链接",
+              "risk_checklist": "不使用未授权素材",
+              "risk_level": "normal"
+            }
+            """
+        )
+        self.assertIn("no text", payload.image_prompt.lower())
+        self.assertIn("no logo", payload.image_prompt.lower())
+        self.assertEqual(validate_generation_payload(payload), [])
 
     def test_generate_brief_dry_run(self):
         client = TestClient(app)

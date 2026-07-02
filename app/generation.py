@@ -265,7 +265,7 @@ def parse_ai_json(raw: str) -> GenerationPayload:
         if not match:
             raise AiGenerationError("AI response is not JSON")
         data = json.loads(match.group(0))
-    return GenerationPayload(
+    payload = GenerationPayload(
         brief=text_value(data.get("brief")),
         hook_hypothesis=text_value(data.get("hook_hypothesis")),
         caption_en=text_value(data.get("caption_en")),
@@ -275,6 +275,33 @@ def parse_ai_json(raw: str) -> GenerationPayload:
         publish_checklist=text_value(data.get("publish_checklist")),
         risk_checklist=text_value(data.get("risk_checklist")),
         risk_level=text_value(data.get("risk_level")) or "normal",
+    )
+    return harden_generation_payload(payload)
+
+
+def harden_generation_payload(payload: GenerationPayload) -> GenerationPayload:
+    image_prompt = text_value(payload.image_prompt)
+    image_lower = image_prompt.lower()
+    safety_parts = []
+    if not any(marker in image_lower for marker in ("no text", "without text", "avoid text")):
+        safety_parts.append("no text")
+    if not any(marker in image_lower for marker in ("no logo", "without logo", "avoid logo")):
+        safety_parts.append("no logo")
+    if "watermark" not in image_lower:
+        safety_parts.append("no watermark")
+    if safety_parts:
+        suffix = " Safety constraints: " + ", ".join(safety_parts) + ", no unauthorized IP characters."
+        image_prompt = (image_prompt.rstrip(". ") + "." + suffix).strip()
+    return GenerationPayload(
+        brief=payload.brief,
+        hook_hypothesis=payload.hook_hypothesis,
+        caption_en=payload.caption_en,
+        hashtags_en=payload.hashtags_en,
+        caption_cn_note=payload.caption_cn_note,
+        image_prompt=image_prompt,
+        publish_checklist=payload.publish_checklist,
+        risk_checklist=payload.risk_checklist,
+        risk_level=payload.risk_level,
     )
 
 
