@@ -10,6 +10,53 @@ class FeishuError(RuntimeError):
     pass
 
 
+DATETIME_FIELD_NAMES = {
+    "发生时间",
+    "AI生成时间",
+    "审批通过时间",
+    "计划发布时间",
+    "实际发布时间",
+}
+
+
+def _datetime_to_ms(value: Any) -> Any:
+    if value in ("", None):
+        return value
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return value
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                parsed = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                try:
+                    parsed = datetime.strptime(raw, "%Y-%m-%d %H:%M")
+                except ValueError:
+                    return value
+    else:
+        return value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp() * 1000)
+
+
+def _normalize_bitable_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(fields)
+    for name in DATETIME_FIELD_NAMES:
+        if name in normalized:
+            normalized[name] = _datetime_to_ms(normalized[name])
+    return normalized
+
+
 class FeishuClient:
     def __init__(self, app_id: str, app_secret: str, base_token: str):
         if not (app_id and app_secret and base_token):
@@ -87,7 +134,7 @@ class FeishuClient:
         data = await self._request(
             "PUT",
             f"/bitable/v1/apps/{self.base_token}/tables/{table_id}/records/{record_id}",
-            json={"fields": fields},
+            json={"fields": _normalize_bitable_fields(fields)},
         )
         return data.get("data", {})
 
@@ -95,7 +142,7 @@ class FeishuClient:
         data = await self._request(
             "POST",
             f"/bitable/v1/apps/{self.base_token}/tables/{table_id}/records",
-            json={"fields": fields},
+            json={"fields": _normalize_bitable_fields(fields)},
         )
         return data.get("data", {})
 
