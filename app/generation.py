@@ -463,7 +463,10 @@ async def generate_payload(fields: dict[str, Any], settings: Settings) -> tuple[
             timeout_seconds=settings.generation_ai_timeout_seconds,
         )
         raw = await client.chat_json(system=system, user=user)
-        return parse_ai_json(raw), settings.generation_ai_model
+        try:
+            return parse_ai_json(raw), settings.generation_ai_model
+        except (json.JSONDecodeError, AiGenerationError):
+            return fallback_generation(fields), f"{settings.generation_ai_model}+template-fallback-json"
     return fallback_generation(fields), "template"
 
 

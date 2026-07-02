@@ -187,6 +187,19 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertEqual(payload.hashtags_en, "#GamingSetup #DeskSetup #SwitchAccessories")
         self.assertEqual(validate_generation_payload(payload), [])
 
+    def test_generate_payload_falls_back_when_ai_json_is_invalid(self):
+        settings = Settings(
+            generation_ai_provider="deepseek",
+            generation_ai_api_key="test-key",
+            generation_ai_model="deepseek-chat",
+        )
+        with patch("app.generation.OpenAICompatibleClient") as client_cls:
+            client_cls.return_value.chat_json = AsyncMock(return_value="I cannot provide JSON for this request.")
+            payload, provider = asyncio.run(main_module.generate_payload(fields(), settings))
+        self.assertEqual(provider, "deepseek-chat+template-fallback-json")
+        self.assertIn("Caption EN", build_update_fields(fields(), payload, run_id="genv1-test", source="manual"))
+        self.assertEqual(validate_generation_payload(payload, fields()), [])
+
     def test_generate_brief_dry_run(self):
         client = TestClient(app)
         resp = client.post(
