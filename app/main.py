@@ -440,21 +440,33 @@ async def _execute_image_result_ingest(req: ImageResultIngestRequest, settings: 
     updates, blocking = _extract_image_result_fields(image_task_record_id, image_task_fields)
     result_hash = hashlib.sha256(json.dumps(updates, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     mode = "commit" if req.write_back else "dry-run"
+    output_summary = json.dumps({"updates": updates, "blocking": blocking}, ensure_ascii=False)
 
-    await _write_log(
-        settings,
-        run_id=run_id,
-        record_id=record_id,
-        node="image-task/ingest",
-        status="error" if blocking else ("success" if req.write_back else "dry-run"),
-        input_hash=result_hash,
-        output_summary=json.dumps({"updates": updates, "blocking": blocking}, ensure_ascii=False),
-        decision_reason="; ".join(blocking) if blocking else "image-result-ready",
-        mode=mode,
-    )
     if blocking:
+        await _write_log(
+            settings,
+            run_id=run_id,
+            record_id=record_id,
+            node="image-task/ingest",
+            status="error",
+            input_hash=result_hash,
+            output_summary=output_summary,
+            decision_reason="; ".join(blocking),
+            mode=mode,
+        )
         return {"ok": False, "status": "blocked", "run_id": run_id, "blocking": [{"code": item} for item in blocking]}
     if req.write_back and not settings.image_result_writeback_enabled:
+        await _write_log(
+            settings,
+            run_id=run_id,
+            record_id=record_id,
+            node="image-task/ingest",
+            status="error",
+            input_hash=result_hash,
+            output_summary="SOCIAL_IMAGE_RESULT_WRITEBACK_ENABLED=false",
+            decision_reason="IMAGE_RESULT_WRITEBACK_DISABLED",
+            mode=mode,
+        )
         return {"ok": False, "status": "blocked", "run_id": run_id, "blocking": [{"code": "IMAGE_RESULT_WRITEBACK_DISABLED"}]}
     if req.write_back:
         client = _feishu(settings)
@@ -462,7 +474,32 @@ async def _execute_image_result_ingest(req: ImageResultIngestRequest, settings: 
             raise HTTPException(status_code=503, detail="Feishu env is not configured")
         if record_id == "inline":
             raise HTTPException(status_code=400, detail="write_back requires a persisted record_id")
-        await client.update_record(settings.content_table_id, record_id, updates | {"运行/回放ID": run_id})
+        try:
+            await client.update_record(settings.content_table_id, record_id, updates | {"运行/回放ID": run_id})
+        except Exception as exc:
+            await _write_log(
+                settings,
+                run_id=run_id,
+                record_id=record_id,
+                node="image-task/ingest",
+                status="error",
+                input_hash=result_hash,
+                output_summary=output_summary,
+                decision_reason=f"image-result-writeback-failed:{type(exc).__name__}",
+                mode=mode,
+            )
+            raise
+    await _write_log(
+        settings,
+        run_id=run_id,
+        record_id=record_id,
+        node="image-task/ingest",
+        status="success" if req.write_back else "dry-run",
+        input_hash=result_hash,
+        output_summary=output_summary,
+        decision_reason="image-result-ready",
+        mode=mode,
+    )
     return {
         "ok": True,
         "status": "image-result-ready" if not req.write_back else "image-result-written",
