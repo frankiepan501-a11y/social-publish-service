@@ -280,6 +280,7 @@ def parse_ai_json(raw: str) -> GenerationPayload:
 
 
 def harden_generation_payload(payload: GenerationPayload) -> GenerationPayload:
+    hashtags = normalize_hashtags(payload.hashtags_en)
     image_prompt = text_value(payload.image_prompt)
     image_lower = image_prompt.lower()
     safety_parts = []
@@ -296,13 +297,27 @@ def harden_generation_payload(payload: GenerationPayload) -> GenerationPayload:
         brief=payload.brief,
         hook_hypothesis=payload.hook_hypothesis,
         caption_en=payload.caption_en,
-        hashtags_en=payload.hashtags_en,
+        hashtags_en=hashtags,
         caption_cn_note=payload.caption_cn_note,
         image_prompt=image_prompt,
         publish_checklist=payload.publish_checklist,
         risk_checklist=payload.risk_checklist,
         risk_level=payload.risk_level,
     )
+
+
+def normalize_hashtags(raw: str) -> str:
+    hashtags = text_value(raw)
+    if "#" in hashtags:
+        return hashtags
+    tokens = []
+    for item in re.split(r"[,;，；\n\r\t ]+", hashtags):
+        cleaned = re.sub(r"[^0-9A-Za-z_]", "", item).strip("_")
+        if cleaned:
+            tokens.append("#" + cleaned[:40])
+    if not tokens:
+        tokens = ["#GamingSetup", "#DeskSetup", "#SwitchAccessories", "#GameRoom", "#SetupInspo"]
+    return " ".join(tokens[:8])
 
 
 async def generate_payload(fields: dict[str, Any], settings: Settings) -> tuple[GenerationPayload, str]:

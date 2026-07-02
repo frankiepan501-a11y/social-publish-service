@@ -106,6 +106,25 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertIn("no logo", payload.image_prompt.lower())
         self.assertEqual(validate_generation_payload(payload), [])
 
+    def test_parse_ai_json_normalizes_plain_hashtags(self):
+        payload = parse_ai_json(
+            """
+            {
+              "brief": "- Brief",
+              "hook_hypothesis": "Test a setup hook.",
+              "caption_en": "Make your setup cleaner with a compact charging dock.",
+              "hashtags_en": "GamingSetup DeskSetup SwitchAccessories",
+              "caption_cn_note": "围绕场景和保存动机写。",
+              "image_prompt": "Bright ecommerce product photo, no text, no logo, no watermark",
+              "publish_checklist": "确认素材\\n确认链接",
+              "risk_checklist": "不使用未授权素材",
+              "risk_level": "normal"
+            }
+            """
+        )
+        self.assertEqual(payload.hashtags_en, "#GamingSetup #DeskSetup #SwitchAccessories")
+        self.assertEqual(validate_generation_payload(payload), [])
+
     def test_generate_brief_dry_run(self):
         client = TestClient(app)
         resp = client.post(
