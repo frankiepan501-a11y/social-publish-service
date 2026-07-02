@@ -30,6 +30,9 @@ class Settings:
     metrics_table_id: str = os.getenv("FEISHU_METRICS_TABLE_ID", "tbl6LPXQlpXg9KXG")
     image_task_base_token: str = os.getenv("FEISHU_IMAGE_TASK_BASE_TOKEN", "Y0mdb6727arI58sLBsIcI7i3ncc")
     image_task_table_id: str = os.getenv("FEISHU_IMAGE_TASK_TABLE_ID", "tblXrErgSSj2I5uI")
+    product_library_base_token: str = os.getenv("FEISHU_PRODUCT_LIBRARY_BASE_TOKEN", "MvtZb6OE9aJFaisO913cWSErnFe")
+    product_powkong_table_id: str = os.getenv("FEISHU_PRODUCT_POWKONG_TABLE_ID", "tblBCI4QaOZAgv3r")
+    product_funlab_table_id: str = os.getenv("FEISHU_PRODUCT_FUNLAB_TABLE_ID", "tblwJ3BRkIuHDuSK")
 
     generation_ai_provider: str = os.getenv("GENERATION_AI_PROVIDER", "template")
     generation_ai_base_url: str = os.getenv("GENERATION_AI_BASE_URL", "https://api.deepseek.com")
@@ -48,6 +51,9 @@ class Settings:
 
     def image_task_enabled(self) -> bool:
         return bool(self.feishu_app_id and self.feishu_app_secret and self.image_task_base_token)
+
+    def product_library_enabled(self) -> bool:
+        return bool(self.feishu_app_id and self.feishu_app_secret and self.product_library_base_token)
 
 
 def get_settings() -> Settings:

@@ -23,6 +23,7 @@ FIXTURE_FIELDS = {
     "实验变量": "Hook",
     "素材类型": "single_image",
     "状态": "选题中",
+    "产品参考图": [{"file_token": "smoke_ref_token", "name": "reference.png"}],
 }
 
 

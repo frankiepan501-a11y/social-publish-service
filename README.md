@@ -22,7 +22,9 @@ Generation endpoint:
 - `POST /generate/brief`
 - Reads one content calendar record.
 - Generates `AI生成Brief`, `Hook假设`, `Caption EN`, `Hashtag EN`, `中文说明`, `AI图片Prompt`, `发布Checklist`, `风险Checklist`.
-- Blocks invalid generated output before writeback: required generated fields must be non-empty, hashtags must contain `#`, `risk_level` must be `normal`/`high-risk`/`blocked`, captions must not contain configured IP/competitor block terms, and image prompts must include no-text/no-logo guards without asking to render logos, text overlays, or watermarks.
+- Before generation, best-effort enriches the content record from the product library by `产品库记录ID` or exact SKU/brand-model match. The enriched context includes product reference images, product brief, brand/model names, and FUNLAB IP compliance fields.
+- Blocks invalid generated output before writeback: required generated fields must be non-empty, hashtags must contain `#`, `risk_level` must be `normal`/`high-risk`/`blocked`, captions must not contain configured IP/competitor block terms, and image prompts must include product-reference source-of-truth wording plus no-text/no-new-logo-overlay guards without asking to render new logos, text overlays, watermarks, or product redesigns.
+- For FUNLAB Codex Image content, `IP合规状态` / `产品库IP合规状态` must be `合规-无IP` or `合规-已授权`; empty or risky statuses block generation.
 - If `write_back=true` and `SOCIAL_GENERATION_WRITEBACK_ENABLED=true`, writes generated fields to Feishu and moves `状态=选题中` to `待审核`.
 - If `write_back=true` while the gate is disabled, returns `GENERATION_WRITEBACK_DISABLED` and does not generate or write content fields.
 - It never sets `审批通过`, `最终素材确认`, or `待发布`.
@@ -39,7 +41,8 @@ Generation scan:
 
 Image task bridge:
 - `POST /image-task/create` builds one Codex Image Worker task payload from a content calendar record.
-- `POST /image-task/scan` selects records with `AI图片Prompt`, `图片生成模式=Codex Image`, and no existing `图片任务record_id`, then calls the same task builder.
+- `POST /image-task/scan` selects records with `AI图片Prompt`, `图片生成模式=Codex Image`, product reference image available, and no existing `图片任务record_id`, then calls the same task builder.
+- Codex Image tasks must carry `产品原图`; the worker prompt treats that image as the single source of truth and allows only scene, lighting, camera, background, and composition changes.
 - `POST /image-task/ingest` maps a worker result back to content fields such as `图片生成状态`, `生成图片file_token`, and `AI生成图链接`.
 - `POST /image-task/ingest-scan` selects content records that already have `图片任务record_id` but do not yet have a complete image result, then calls the same ingest path per record.
 - The Codex Image Worker remains a local POC. The service only creates/reads Feishu task records after explicit gates are opened.
@@ -72,6 +75,9 @@ Required environment for production:
 - `FEISHU_METRICS_TABLE_ID`
 - `FEISHU_IMAGE_TASK_BASE_TOKEN`
 - `FEISHU_IMAGE_TASK_TABLE_ID`
+- `FEISHU_PRODUCT_LIBRARY_BASE_TOKEN`
+- `FEISHU_PRODUCT_POWKONG_TABLE_ID`
+- `FEISHU_PRODUCT_FUNLAB_TABLE_ID`
 - `GENERATION_AI_PROVIDER` (`template` by default; use an OpenAI-compatible provider name for live AI)
 - `GENERATION_AI_BASE_URL`
 - `GENERATION_AI_API_KEY`

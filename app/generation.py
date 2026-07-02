@@ -12,7 +12,7 @@ from .config import Settings
 from .rules import bool_value, multi_value, select_value, text_value
 
 
-GENERATION_VERSION = "fb-ig-gen-v1.0"
+GENERATION_VERSION = "fb-ig-gen-v1.1"
 
 GENERATION_BLOCK_TERMS = (
     "mario",
@@ -29,19 +29,66 @@ IMAGE_PROMPT_FORBIDDEN_RENDER_RE = re.compile(
     r"\b(add|include|render|show|place|with)\b.{0,40}\b(logo|text overlay|watermark)\b",
     re.I,
 )
+IMAGE_PROMPT_FORBIDDEN_PRODUCT_CHANGE_RE = re.compile(
+    r"\b(redesign|re[- ]?design|recolor|recolour|change the product|change product|"
+    r"replace the product|make a new version|invent product parts|alter the product|"
+    r"modify the product shape|different product)\b",
+    re.I,
+)
+
+PRODUCT_REFERENCE_FIELD_NAMES = (
+    "产品参考图",
+    "产品原图",
+    "产品图片",
+    "产品库图片",
+    "图片",
+)
+FUNLAB_IP_ALLOWED_STATUSES = {"合规-无IP", "合规-已授权"}
+FUNLAB_IP_STATUS_FIELD_NAMES = ("IP合规状态", "产品库IP合规状态")
+REFERENCE_SOURCE_OF_TRUTH_RULE = (
+    "Use the attached product reference image as the single source of truth for the product. "
+    "Preserve the exact product shape, proportions, color, material, buttons, ports, textures, visible markings, "
+    "and accessory layout. Only change the surrounding scene, lighting, camera angle, background, and composition. "
+    "Do not redesign, recolor, morph, simplify, replace, or invent product parts."
+)
+
+
+def _has_positive_forbidden_match(pattern: re.Pattern[str], text: str) -> bool:
+    for match in pattern.finditer(text):
+        prefix = text[max(0, match.start() - 80) : match.start()].lower()
+        if any(marker in prefix for marker in ("do not ", "don't ", "never ", "no ", "not ", "without ")):
+            continue
+        return True
+    return False
 
 BRAND_RULES = {
     "Powkong": {
-        "voice": "bright, playful, collectible desk setup energy; accessible and casual.",
-        "visual": "clean bright desk scene, Powkong Orange #FF9D00 accents, product silhouette as hero.",
-        "avoid": "hardcore esports claims, Pro/Tournament positioning, public Nintendo IP words, Mario, Pokemon, Piranha Plant.",
+        "voice": "fun but not childish, player-aware but not technical-flexing, confident and casual.",
+        "visual": (
+            "bright collectible desk setup; Powkong Orange #FF9D00 as the warm accent; white or warm home desk base; "
+            "colorful but controlled 60-30-10 palette; product as a characterful desk object."
+        ),
+        "photo_style": "GENKI-like soft product photography plus Mfish-like warm colorful desk styling.",
+        "avoid": (
+            "hardcore esports, Pro/Tournament positioning, cyberpunk, always-on RGB glow, Funlab purple, "
+            "public Nintendo IP words, Mario, Pokemon, Piranha Plant."
+        ),
         "slogan": "Gear with Character.",
+        "must": "Make the product feel portable, expressive, desk-friendly, and characterful without using unauthorized IP.",
     },
     "FUNLAB": {
-        "voice": "premium gaming, controlled intensity, Hidden Glow contrast, design-led.",
-        "visual": "Void Black background, Funlab Purple #9900FF glow, hidden-until-lit reveal, cinematic low-key light.",
-        "avoid": "candy color, warm toy tone, Powkong orange, public competitor comparisons such as RAZER, 8BitDo, GameSir.",
+        "voice": "hardcore but readable, design-led, direct, controlled intensity, never candy-like.",
+        "visual": (
+            "Void Black #0B0B10 dominant background, Funlab Purple #9900FF glow accent, Hidden Glow reveal, "
+            "low-key cinematic side light, high contrast, gaming-room atmosphere."
+        ),
+        "photo_style": "low-light dramatic product photography with crisp edges, visible glow contrast, and dark premium surfaces.",
+        "avoid": (
+            "candy color, warm toy tone, family scenes, Powkong orange, public competitor comparisons such as "
+            "RAZER, 8BitDo, GameSir."
+        ),
         "slogan": "Hidden Until Lit.",
+        "must": "Anchor the visual in Hidden Glow, dark contrast, and a powered-on reveal moment when applicable.",
     },
 }
 
@@ -83,6 +130,16 @@ def generation_input_hash(fields: dict[str, Any]) -> str:
         "产品名",
         "品牌型号/SKU",
         "主推卖点",
+        "产品库记录ID",
+        "产品库产品简述",
+        "产品库系列英文名",
+        "产品库型号英文名",
+        "产品库适配IP/IP联想",
+        "产品库IP合规状态",
+        "IP合规状态",
+        "IP合规备注",
+        "产品参考图",
+        "产品原图",
         "品牌",
         "平台",
         "发布位置",
@@ -96,6 +153,50 @@ def generation_input_hash(fields: dict[str, Any]) -> str:
     payload = {key: fields.get(key) for key in keys}
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def product_reference_images(fields: dict[str, Any]) -> list[Any]:
+    for field_name in PRODUCT_REFERENCE_FIELD_NAMES:
+        value = fields.get(field_name)
+        if isinstance(value, list) and value:
+            return value
+        if isinstance(value, dict) and value:
+            return [value]
+    return []
+
+
+def has_product_reference_image(fields: dict[str, Any]) -> bool:
+    return bool(product_reference_images(fields))
+
+
+def funlab_ip_compliance_status(fields: dict[str, Any]) -> str:
+    for field_name in FUNLAB_IP_STATUS_FIELD_NAMES:
+        status = select_value(fields.get(field_name))
+        if status:
+            return status
+    return ""
+
+
+def image_generation_mode(fields: dict[str, Any]) -> str:
+    return select_value(fields.get("图片生成模式")) or "Codex Image"
+
+
+def image_generation_requires_reference(fields: dict[str, Any]) -> bool:
+    return image_generation_mode(fields) == "Codex Image"
+
+
+def funlab_ip_compliance_issue(fields: dict[str, Any]) -> str:
+    brand = select_value(fields.get("品牌"))
+    if brand.upper() != "FUNLAB":
+        return ""
+    if image_generation_mode(fields) == "不生成":
+        return ""
+    status = funlab_ip_compliance_status(fields)
+    if not status:
+        return "FUNLAB_IP_COMPLIANCE_MISSING"
+    if status not in FUNLAB_IP_ALLOWED_STATUSES:
+        return f"FUNLAB_IP_COMPLIANCE_BLOCKED:{status}"
+    return ""
 
 
 def required_generation_missing(fields: dict[str, Any]) -> list[str]:
@@ -137,6 +238,13 @@ def build_prompt(fields: dict[str, Any]) -> tuple[str, str]:
     experiment = select_value(fields.get("实验变量"))
     material_type = select_value(fields.get("素材类型")) or "single_image"
     selling_points = text_value(fields.get("主推卖点")) or "one clear practical benefit"
+    product_brief = text_value(fields.get("产品库产品简述"))
+    series_en = text_value(fields.get("产品库系列英文名") or fields.get("系列英文名"))
+    model_en = text_value(fields.get("产品库型号英文名") or fields.get("型号英文名"))
+    ip_status = funlab_ip_compliance_status(fields)
+    ip_note = text_value(fields.get("产品库IP合规备注") or fields.get("IP合规备注"))
+    ip_association = text_value(fields.get("产品库适配IP/IP联想") or fields.get("适配IP/IP联想"))
+    reference_available = has_product_reference_image(fields)
     target_url = text_value(fields.get("目标链接"))
     offer = "yes" if bool_value(fields.get("权益内容")) else "no"
 
@@ -170,17 +278,30 @@ def build_prompt(fields: dict[str, Any]) -> tuple[str, str]:
             "experiment_variable": experiment,
             "experiment_rule": EXPERIMENT_GUIDE.get(experiment, "Only test one variable."),
             "selling_points": selling_points,
+            "product_library_brief": product_brief,
+            "series_en": series_en,
+            "model_en": model_en,
+            "product_reference_image_available": reference_available,
+            "ip_compliance_status": ip_status,
+            "ip_compliance_note": ip_note,
+            "ip_association": ip_association,
             "target_url_present": bool(target_url),
             "offer_content": offer,
         },
         "brand_rules": brand_rules,
+        "image_reference_rule": REFERENCE_SOURCE_OF_TRUTH_RULE,
         "content_job": PILLAR_JOBS.get(pillar, "make one useful brand-native post"),
         "hard_rules": [
+            "For image_prompt, assume the product reference image will be attached to the image worker.",
+            "The image prompt must explicitly tell the image model to preserve the exact referenced product unchanged.",
+            "Only the surrounding scene, lighting, camera angle, background, and composition may change.",
+            "Do not ask for a redesigned, recolored, simplified, replaced, or newly invented product.",
             "Do not use Mario, Pokemon, Piranha Plant, Zelda, Nintendo official, RAZER, 8BitDo, GameSir.",
             "Do not claim official license unless explicitly provided.",
             "Do not write cold DM copy.",
             "Do not create more than one experiment variable.",
-            "Image prompt must not ask to render logos or text overlays.",
+            "Image prompt must not ask to render new logos, text overlays, watermarks, or unauthorized IP characters.",
+            "Preserve only logos or markings already visible in the reference image.",
         ],
     }
     return system, json.dumps(user, ensure_ascii=False, indent=2)
@@ -196,6 +317,8 @@ def fallback_generation(fields: dict[str, Any]) -> GenerationPayload:
     experiment = select_value(fields.get("实验变量")) or "Hook"
     selling_points = text_value(fields.get("主推卖点")) or "a cleaner, easier gaming setup"
     material_type = select_value(fields.get("素材类型")) or "single_image"
+    product_brief = text_value(fields.get("产品库产品简述"))
+    product_detail = f" Product library note: {product_brief}." if product_brief else ""
 
     caption = (
         f"Make your setup feel more intentional with {product}. "
@@ -218,8 +341,11 @@ def fallback_generation(fields: dict[str, Any]) -> GenerationPayload:
     )
     hook = f"Test whether leading with {selling_points} improves {signal} for {product}."
     image_prompt = (
+        f"{REFERENCE_SOURCE_OF_TRUTH_RULE} "
         f"Product photography concept for {brand} {product}: {brand_rules['visual']} "
-        f"Show one clear use case, clean composition, premium ecommerce lighting, no text, no logo overlay, no unauthorized IP characters. "
+        f"{brand_rules.get('photo_style', '')} {brand_rules.get('must', '')}{product_detail} "
+        f"Show one clear use case, clean composition, product-first framing, no text, no new logo overlay, "
+        f"preserve only markings already visible in the reference image, no watermark, no unauthorized IP characters. "
         f"Format: {material_type}."
     )
     checklist = "\n".join(
@@ -283,15 +409,22 @@ def harden_generation_payload(payload: GenerationPayload) -> GenerationPayload:
     hashtags = normalize_hashtags(payload.hashtags_en)
     image_prompt = text_value(payload.image_prompt)
     image_lower = image_prompt.lower()
+    if not ("reference image" in image_lower and "preserve" in image_lower):
+        image_prompt = f"{REFERENCE_SOURCE_OF_TRUTH_RULE} {image_prompt}".strip()
+        image_lower = image_prompt.lower()
     safety_parts = []
     if not any(marker in image_lower for marker in ("no text", "without text", "avoid text")):
         safety_parts.append("no text")
-    if not any(marker in image_lower for marker in ("no logo", "without logo", "avoid logo")):
-        safety_parts.append("no logo")
+    if not any(marker in image_lower for marker in ("no logo", "no new logo", "no logo overlay", "without logo", "avoid logo")):
+        safety_parts.append("no new logo overlay")
     if "watermark" not in image_lower:
         safety_parts.append("no watermark")
     if safety_parts:
-        suffix = " Safety constraints: " + ", ".join(safety_parts) + ", no unauthorized IP characters."
+        suffix = (
+            " Safety constraints: "
+            + ", ".join(safety_parts)
+            + ", preserve only logos or markings already visible in the reference image, no unauthorized IP characters."
+        )
         image_prompt = (image_prompt.rstrip(". ") + "." + suffix).strip()
     return GenerationPayload(
         brief=payload.brief,
@@ -334,7 +467,7 @@ async def generate_payload(fields: dict[str, Any], settings: Settings) -> tuple[
     return fallback_generation(fields), "template"
 
 
-def validate_generation_payload(payload: GenerationPayload) -> list[str]:
+def validate_generation_payload(payload: GenerationPayload, source_fields: dict[str, Any] | None = None) -> list[str]:
     required_fields = {
         "brief": payload.brief,
         "hook_hypothesis": payload.hook_hypothesis,
@@ -361,16 +494,33 @@ def validate_generation_payload(payload: GenerationPayload) -> list[str]:
 
     image_lower = payload.image_prompt.lower()
     has_no_text_guard = any(marker in image_lower for marker in ("no text", "without text", "avoid text"))
-    has_no_logo_guard = any(marker in image_lower for marker in ("no logo", "without logo", "avoid logo"))
+    has_no_logo_guard = any(
+        marker in image_lower
+        for marker in ("no logo", "no new logo", "no logo overlay", "without logo", "avoid logo")
+    )
     if not has_no_text_guard or not has_no_logo_guard:
         issues.append("IMAGE_PROMPT_SAFETY_GUARD_MISSING")
+    if not ("reference image" in image_lower and "preserve" in image_lower):
+        issues.append("IMAGE_PROMPT_REFERENCE_GUARD_MISSING")
 
-    if IMAGE_PROMPT_FORBIDDEN_RENDER_RE.search(payload.image_prompt):
+    if _has_positive_forbidden_match(IMAGE_PROMPT_FORBIDDEN_RENDER_RE, payload.image_prompt):
         issues.append("IMAGE_PROMPT_FORBIDDEN_RENDER_INSTRUCTION")
+    if _has_positive_forbidden_match(IMAGE_PROMPT_FORBIDDEN_PRODUCT_CHANGE_RE, payload.image_prompt):
+        issues.append("IMAGE_PROMPT_FORBIDDEN_PRODUCT_CHANGE")
 
     for term in GENERATION_BLOCK_TERMS:
         if term in image_lower and f"no {term}" not in image_lower and f"without {term}" not in image_lower:
             issues.append(f"IMAGE_PROMPT_BLOCK_TERM:{term}")
+
+    if source_fields:
+        context_error = text_value(source_fields.get("_product_context_error"))
+        if context_error:
+            issues.append("PRODUCT_CONTEXT_ERROR")
+        if image_generation_requires_reference(source_fields) and not has_product_reference_image(source_fields):
+            issues.append("PRODUCT_REFERENCE_IMAGE_MISSING")
+        ip_issue = funlab_ip_compliance_issue(source_fields)
+        if ip_issue:
+            issues.append(ip_issue)
 
     return issues
 

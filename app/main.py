@@ -15,6 +15,10 @@ from .generation import (
     generate_payload,
     generation_candidate_reason,
     generation_input_hash,
+    funlab_ip_compliance_issue,
+    has_product_reference_image,
+    image_generation_requires_reference,
+    product_reference_images,
     required_generation_missing,
     validate_generation_payload,
 )
@@ -75,6 +79,109 @@ def _feishu_image(settings: Settings) -> FeishuClient | None:
     if not settings.image_task_enabled():
         return None
     return FeishuClient(settings.feishu_app_id, settings.feishu_app_secret, settings.image_task_base_token)
+
+
+def _feishu_product(settings: Settings) -> FeishuClient | None:
+    if not settings.product_library_enabled():
+        return None
+    return FeishuClient(settings.feishu_app_id, settings.feishu_app_secret, settings.product_library_base_token)
+
+
+def _product_table_id_for_brand(settings: Settings, brand: str) -> str:
+    return settings.product_funlab_table_id if brand.upper() == "FUNLAB" else settings.product_powkong_table_id
+
+
+def _norm_match(value: str) -> str:
+    return text_value(value).lower().replace(" ", "").replace("-", "")
+
+
+def _merge_product_context_fields(fields: dict, product_record: dict | None) -> dict:
+    if not product_record:
+        return fields
+    product_fields = normalize_fields(product_record)
+    merged = dict(fields)
+    product_record_id = text_value(product_record.get("record_id"))
+    if product_record_id and not text_value(merged.get("产品库记录ID")):
+        merged["产品库记录ID"] = product_record_id
+
+    image_value = product_fields.get("图片")
+    if image_value and not has_product_reference_image(merged):
+        merged["产品参考图"] = image_value
+        merged["产品库图片"] = image_value
+
+    field_map = {
+        "产品库产品简述": "产品简述",
+        "产品库系列英文名": "系列英文名",
+        "产品库型号英文名": "型号英文名",
+        "产品库适配IP/IP联想": "适配IP/IP联想",
+        "产品库IP合规状态": "IP合规状态",
+        "产品库IP合规备注": "IP合规备注",
+    }
+    for target, source in field_map.items():
+        value = product_fields.get(source)
+        if value and not text_value(merged.get(target)):
+            merged[target] = value
+    if not text_value(merged.get("IP合规状态")) and product_fields.get("IP合规状态"):
+        merged["IP合规状态"] = product_fields.get("IP合规状态")
+    if not text_value(merged.get("IP合规备注")) and product_fields.get("IP合规备注"):
+        merged["IP合规备注"] = product_fields.get("IP合规备注")
+    if not text_value(merged.get("适配IP/IP联想")) and product_fields.get("适配IP/IP联想"):
+        merged["适配IP/IP联想"] = product_fields.get("适配IP/IP联想")
+    if not text_value(merged.get("产品名")):
+        merged["产品名"] = (
+            text_value(product_fields.get("产品中文名"))
+            or text_value(product_fields.get("型号中文名"))
+            or text_value(product_fields.get("型号英文名"))
+        )
+    if not text_value(merged.get("品牌型号/SKU")):
+        merged["品牌型号/SKU"] = text_value(product_fields.get("品牌型号")) or text_value(product_fields.get("ERP SKU"))
+    if not text_value(merged.get("主推卖点")) and product_fields.get("产品简述"):
+        merged["主推卖点"] = product_fields.get("产品简述")
+    return merged
+
+
+async def _load_product_record_for_content(fields: dict, settings: Settings) -> dict | None:
+    brand = select_value(fields.get("品牌")) or "Powkong"
+    table_id = _product_table_id_for_brand(settings, brand)
+    client = _feishu_product(settings)
+    if client is None:
+        return None
+
+    record_id = text_value(fields.get("产品库记录ID"))
+    if record_id:
+        return await client.get_record(table_id, record_id)
+
+    sku = text_value(fields.get("品牌型号/SKU"))
+    if not sku:
+        return None
+    needle = _norm_match(sku)
+    for record in await client.list_records(table_id, page_size=200):
+        product_fields = normalize_fields(record)
+        candidates = [
+            text_value(product_fields.get("品牌型号")),
+            text_value(product_fields.get("ERP SKU")),
+            text_value(product_fields.get("报价单型号")),
+            text_value(product_fields.get("工厂型号")),
+            text_value(product_fields.get("型号中文名")),
+            text_value(product_fields.get("型号英文名")),
+        ]
+        if any(_norm_match(candidate) == needle for candidate in candidates if candidate):
+            return record
+    return None
+
+
+async def _enrich_content_fields_with_product_context(fields: dict, settings: Settings) -> dict:
+    if text_value(fields.get("_product_context_loaded")):
+        return fields
+    enriched = dict(fields)
+    try:
+        product_record = await _load_product_record_for_content(enriched, settings)
+    except FeishuError as exc:
+        enriched["_product_context_error"] = str(exc)
+        return enriched
+    enriched = _merge_product_context_fields(enriched, product_record)
+    enriched["_product_context_loaded"] = "true" if product_record else "false"
+    return enriched
 
 
 async def _load_record(req: PublishRequest, settings: Settings) -> tuple[str, dict]:
@@ -185,10 +292,12 @@ def _image_ratio_for_content(fields: dict) -> str:
 def _build_image_task_fields(record_id: str, fields: dict) -> tuple[dict, list[str], str]:
     product = text_value(fields.get("产品名")) or text_value(fields.get("内容标题"))
     brand = select_value(fields.get("品牌"))
+    task_brand = "Funlab" if brand.upper() == "FUNLAB" else brand
     image_prompt = text_value(fields.get("AI图片Prompt"))
     mode = select_value(fields.get("图片生成模式")) or "Codex Image"
     scene_template = select_value(fields.get("场景模板")) or "FB/INS广告图"
     size = text_value(fields.get("图片生成尺寸")) or _image_ratio_for_content(fields)
+    references = product_reference_images(fields)
     missing = []
     if mode != "Codex Image":
         missing.append("图片生成模式 must be Codex Image")
@@ -196,6 +305,11 @@ def _build_image_task_fields(record_id: str, fields: dict) -> tuple[dict, list[s
         missing.append("产品名 or 内容标题")
     if not image_prompt:
         missing.append("AI图片Prompt")
+    if image_generation_requires_reference(fields) and not references:
+        missing.append("产品参考图/产品原图")
+    ip_issue = funlab_ip_compliance_issue(fields)
+    if ip_issue:
+        missing.append(ip_issue)
     if text_value(fields.get("图片任务record_id")) and not bool(fields.get("_force_image_task")):
         missing.append("图片任务record_id already exists")
 
@@ -203,19 +317,27 @@ def _build_image_task_fields(record_id: str, fields: dict) -> tuple[dict, list[s
         [
             f"Source content_record_id: {record_id}",
             "Use case: FB/IG organic content candidate image.",
-            "Generate a review candidate only. Do not add visible text, logos, watermarks, or copyrighted characters.",
+            "Generate a review candidate only.",
+            (
+                "Mandatory product rule: use the attached 产品原图/reference image as the exact source of truth. "
+                "Do not redesign, recolor, morph, simplify, replace, or invent product parts. "
+                "Only change the surrounding scene, lighting, camera angle, background, and composition."
+            ),
+            "Do not add visible text, new logos, watermarks, copyrighted characters, or competitor products.",
             image_prompt,
         ]
     )
     task_fields = {
         "产品名称": product,
-        "品牌": brand,
+        "品牌": task_brand,
         "工作流选择": "Codex Image",
         "状态": "待处理",
         "尺寸选择": size,
         "场景模板": scene_template,
         "自定义提示词": custom_prompt,
     }
+    if references:
+        task_fields["产品原图"] = references
     raw = json.dumps(task_fields, ensure_ascii=False, sort_keys=True, default=str)
     return task_fields, missing, hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -229,6 +351,11 @@ def _image_task_candidate_reason(fields: dict, *, force: bool = False) -> tuple[
         return False, f"image_mode={mode or 'empty'}"
     if not text_value(fields.get("AI图片Prompt")):
         return False, "AI图片Prompt missing"
+    if image_generation_requires_reference(fields) and not has_product_reference_image(fields):
+        return False, "产品参考图/产品原图 missing"
+    ip_issue = funlab_ip_compliance_issue(fields)
+    if ip_issue:
+        return False, ip_issue
     task_status = select_value(fields.get("图片生成状态"))
     if task_status in {"已提交", "生成中", "已生成-待转URL", "已转发布URL"} and not force:
         return False, f"image_status={task_status}"
@@ -284,6 +411,7 @@ async def _execute_image_task(req: ImageTaskRequest, settings: Settings) -> dict
     run_id = f"imgtaskv1-{uuid.uuid4().hex[:16]}"
     record_id, record = await _load_image_task_source(req, settings)
     fields = normalize_fields(record)
+    fields = await _enrich_content_fields_with_product_context(fields, settings)
     fields["_force_image_task"] = req.force
     task_fields, missing, task_hash = _build_image_task_fields(record_id, fields)
     mode = "commit" if req.write_task else "dry-run"
@@ -381,10 +509,11 @@ async def _execute_image_task_scan(req: ImageTaskScanRequest, settings: Settings
     skipped = []
     for index, record in enumerate(records):
         fields = normalize_fields(record)
+        fields = await _enrich_content_fields_with_product_context(fields, settings)
         ok, reason = _image_task_candidate_reason(fields, force=req.force)
         record_id = record.get("record_id") or f"inline-{index}"
         if ok:
-            selected.append((record_id, record))
+            selected.append((record_id, {"record_id": record_id, "fields": fields}))
         else:
             skipped.append({"record_id": record_id, "reason": reason})
         if len(selected) >= req.limit:
@@ -942,6 +1071,7 @@ async def _execute_generate(req: GenerateBriefRequest, settings: Settings) -> di
     run_id = f"genv1-{uuid.uuid4().hex[:16]}"
     record_id, record = await _load_generate_record(req, settings)
     fields = record.get("fields", record)
+    fields = await _enrich_content_fields_with_product_context(fields, settings)
     current_hash = generation_input_hash(fields)
     mode = "commit" if req.write_back else "dry-run"
 
@@ -1008,7 +1138,7 @@ async def _execute_generate(req: GenerateBriefRequest, settings: Settings) -> di
         )
         return {"ok": False, "status": "generation-failed", "run_id": run_id, "reason": reason}
 
-    quality_issues = validate_generation_payload(payload)
+    quality_issues = validate_generation_payload(payload, fields)
     if quality_issues:
         reason = "GENERATION_OUTPUT_INVALID"
         summary = "; ".join(quality_issues)
@@ -1095,10 +1225,11 @@ async def _execute_generate_scan(req: GenerateScanRequest, settings: Settings) -
     skipped = []
     for index, record in enumerate(records):
         fields = record.get("fields", record)
+        fields = await _enrich_content_fields_with_product_context(fields, settings)
         ok, reason = generation_candidate_reason(fields, force=req.force)
         record_id = record.get("record_id") or f"inline-{index}"
         if ok:
-            selected.append((record_id, record))
+            selected.append((record_id, {"record_id": record_id, "fields": fields}))
         else:
             skipped.append({"record_id": record_id, "reason": reason})
         if len(selected) >= req.limit:

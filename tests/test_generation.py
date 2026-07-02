@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 import app.main as main_module
 from app.config import Settings
 from app.generation import (
+    build_prompt,
     build_update_fields,
     fallback_generation,
     generation_candidate_reason,
@@ -33,6 +34,7 @@ def fields(**overrides):
         "实验变量": "Hook",
         "素材类型": "single_image",
         "状态": "选题中",
+        "产品参考图": [{"file_token": "ref_file_token", "name": "reference.png"}],
     }
     base.update(overrides)
     return base
@@ -96,7 +98,14 @@ class GenerationRulesTest(unittest.TestCase):
 
     def test_validate_generation_payload_accepts_template(self):
         payload = fallback_generation(fields())
-        self.assertEqual(validate_generation_payload(payload), [])
+        self.assertEqual(validate_generation_payload(payload, fields()), [])
+
+    def test_build_prompt_includes_brand_vi_and_reference_guard(self):
+        system, user = build_prompt(fields())
+        self.assertIn("valid JSON", system)
+        self.assertIn("Powkong Orange #FF9D00", user)
+        self.assertIn("Use the attached product reference image", user)
+        self.assertIn("Preserve the exact product shape", user)
 
     def test_validate_generation_payload_blocks_missing_fields(self):
         payload = replace(fallback_generation(fields()), caption_en="", hashtags_en="GamingSetup", risk_level="maybe")
@@ -119,6 +128,26 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertIn("IMAGE_PROMPT_SAFETY_GUARD_MISSING", issues)
         self.assertIn("IMAGE_PROMPT_FORBIDDEN_RENDER_INSTRUCTION", issues)
 
+    def test_validate_generation_payload_blocks_positive_product_change(self):
+        payload = replace(
+            fallback_generation(fields()),
+            image_prompt=(
+                "Use the attached product reference image and preserve the product, "
+                "but redesign the product as a blue premium controller, no text, no new logo overlay, no watermark."
+            ),
+        )
+        issues = validate_generation_payload(payload, fields())
+        self.assertIn("IMAGE_PROMPT_FORBIDDEN_PRODUCT_CHANGE", issues)
+
+    def test_funlab_generation_requires_ip_compliance(self):
+        payload = fallback_generation(fields(**{"品牌": "FUNLAB"}))
+        issues = validate_generation_payload(payload, fields(**{"品牌": "FUNLAB"}))
+        self.assertIn("FUNLAB_IP_COMPLIANCE_MISSING", issues)
+        ok_fields = fields(**{"品牌": "FUNLAB", "产品库IP合规状态": "合规-无IP"})
+        self.assertEqual(validate_generation_payload(payload, ok_fields), [])
+        blocked_fields = fields(**{"品牌": "FUNLAB", "产品库IP合规状态": "风险-限非Funlab"})
+        self.assertIn("FUNLAB_IP_COMPLIANCE_BLOCKED:风险-限非Funlab", validate_generation_payload(payload, blocked_fields))
+
     def test_parse_ai_json_hardens_missing_image_prompt_guards(self):
         payload = parse_ai_json(
             """
@@ -136,7 +165,7 @@ class GenerationRulesTest(unittest.TestCase):
             """
         )
         self.assertIn("no text", payload.image_prompt.lower())
-        self.assertIn("no logo", payload.image_prompt.lower())
+        self.assertIn("no new logo overlay", payload.image_prompt.lower())
         self.assertEqual(validate_generation_payload(payload), [])
 
     def test_parse_ai_json_normalizes_plain_hashtags(self):
@@ -196,6 +225,66 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertEqual(body["task_fields"]["工作流选择"], "Codex Image")
         self.assertEqual(body["task_fields"]["状态"], "待处理")
         self.assertIn("rec_image_source", body["task_fields"]["自定义提示词"])
+        self.assertEqual(body["task_fields"]["产品原图"][0]["file_token"], "ref_file_token")
+        self.assertIn("exact source of truth", body["task_fields"]["自定义提示词"])
+
+    def test_image_task_create_blocks_missing_reference_image(self):
+        client = TestClient(app)
+        source = fields(
+            **{
+                "AI图片Prompt": "Product-first bright desk setup, no text, no logo, no watermark.",
+                "图片生成模式": "Codex Image",
+                "产品参考图": [],
+            }
+        )
+        resp = client.post(
+            "/image-task/create",
+            json={"record_id": "rec_image_source", "record": {"fields": source}, "write_task": False},
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["ok"])
+        self.assertIn("产品参考图/产品原图", body["missing"])
+
+    def test_image_task_create_blocks_funlab_ip_risk(self):
+        client = TestClient(app)
+        source = fields(
+            **{
+                "品牌": "FUNLAB",
+                "产品库IP合规状态": "禁售-高风险",
+                "AI图片Prompt": "Dark product-first setup, no text, no logo, no watermark.",
+                "图片生成模式": "Codex Image",
+            }
+        )
+        resp = client.post(
+            "/image-task/create",
+            json={"record_id": "rec_image_source", "record": {"fields": source}, "write_task": False},
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["ok"])
+        self.assertIn("FUNLAB_IP_COMPLIANCE_BLOCKED:禁售-高风险", body["missing"])
+
+    def test_product_context_merge_adds_reference_image_and_ip_fields(self):
+        product_record = {
+            "record_id": "rec_product_1",
+            "fields": {
+                "图片": [{"file_token": "product_ref_token", "name": "product.png"}],
+                "产品简述": "Hidden Glow controller with a low-light reveal.",
+                "系列英文名": "Firefly",
+                "型号英文名": "Firefly Controller",
+                "IP合规状态": "合规-无IP",
+                "IP合规备注": "abstract pattern only",
+                "适配IP/IP联想": "abstract glow pattern",
+                "品牌型号": "FF01A-01",
+            },
+        }
+        merged = main_module._merge_product_context_fields(fields(**{"品牌": "FUNLAB", "产品参考图": []}), product_record)
+        self.assertEqual(merged["产品库记录ID"], "rec_product_1")
+        self.assertEqual(merged["产品参考图"][0]["file_token"], "product_ref_token")
+        self.assertEqual(merged["产品库IP合规状态"], "合规-无IP")
+        self.assertEqual(merged["IP合规状态"], "合规-无IP")
+        self.assertEqual(merged["产品库产品简述"], "Hidden Glow controller with a low-light reveal.")
 
     def test_image_task_write_requires_explicit_gate(self):
         client = TestClient(app)
