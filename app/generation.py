@@ -442,11 +442,9 @@ def harden_generation_payload(payload: GenerationPayload) -> GenerationPayload:
 
 def normalize_hashtags(raw: str) -> str:
     hashtags = text_value(raw)
-    if "#" in hashtags:
-        return hashtags
     tokens = []
     for item in re.split(r"[,;，；\n\r\t ]+", hashtags):
-        cleaned = re.sub(r"[^0-9A-Za-z_]", "", item).strip("_")
+        cleaned = re.sub(r"[^0-9A-Za-z_]", "", item.lstrip("#")).strip("_")
         if cleaned:
             tokens.append("#" + cleaned[:40])
     if not tokens:

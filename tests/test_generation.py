@@ -13,6 +13,7 @@ from app.generation import (
     build_update_fields,
     fallback_generation,
     generation_candidate_reason,
+    normalize_hashtags,
     parse_ai_json,
     required_generation_missing,
     validate_generation_payload,
@@ -194,6 +195,12 @@ class GenerationRulesTest(unittest.TestCase):
         )
         self.assertEqual(payload.hashtags_en, "#GamingSetup #DeskSetup #SwitchAccessories")
         self.assertEqual(validate_generation_payload(payload), [])
+
+    def test_normalize_hashtags_cleans_punctuation(self):
+        self.assertEqual(
+            normalize_hashtags("#HiddenGlow, #GamingSetup, ControllerDesign"),
+            "#HiddenGlow #GamingSetup #ControllerDesign",
+        )
 
     def test_generate_payload_falls_back_when_ai_json_is_invalid(self):
         settings = Settings(
