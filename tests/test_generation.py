@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 import app.main as main_module
 from app.config import Settings
 from app.generation import (
+    brand_product_label,
     build_prompt,
     build_update_fields,
     fallback_generation,
@@ -138,6 +139,13 @@ class GenerationRulesTest(unittest.TestCase):
         )
         issues = validate_generation_payload(payload, fields())
         self.assertIn("IMAGE_PROMPT_FORBIDDEN_PRODUCT_CHANGE", issues)
+
+    def test_brand_product_label_does_not_duplicate_brand_prefix(self):
+        self.assertEqual(
+            brand_product_label("FUNLAB", "FUNLAB YS11 Pro Controller - Zonai"),
+            "FUNLAB YS11 Pro Controller - Zonai",
+        )
+        self.assertEqual(brand_product_label("Powkong", "Dock Gen 2"), "Powkong Dock Gen 2")
 
     def test_funlab_generation_requires_ip_compliance(self):
         payload = fallback_generation(fields(**{"品牌": "FUNLAB"}))

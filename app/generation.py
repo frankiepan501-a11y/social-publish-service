@@ -333,6 +333,7 @@ def fallback_generation(fields: dict[str, Any]) -> GenerationPayload:
     else:
         caption += " Designed to stand out without taking over your desk."
 
+    product_label = brand_product_label(brand, product)
     brief = (
         f"- 内容支柱：{pillar}；目标信号：{signal}\n"
         f"- 本条只测试变量：{experiment}\n"
@@ -342,7 +343,7 @@ def fallback_generation(fields: dict[str, Any]) -> GenerationPayload:
     hook = f"Test whether leading with {selling_points} improves {signal} for {product}."
     image_prompt = (
         f"{REFERENCE_SOURCE_OF_TRUTH_RULE} "
-        f"Product photography concept for {brand} {product}: {brand_rules['visual']} "
+        f"Product photography concept for {product_label}: {brand_rules['visual']} "
         f"{brand_rules.get('photo_style', '')} {brand_rules.get('must', '')}{product_detail} "
         f"Show one clear use case, clean composition, product-first framing, no text, no new logo overlay, "
         f"preserve only markings already visible in the reference image, no watermark, no unauthorized IP characters. "
@@ -451,6 +452,16 @@ def normalize_hashtags(raw: str) -> str:
     if not tokens:
         tokens = ["#GamingSetup", "#DeskSetup", "#SwitchAccessories", "#GameRoom", "#SetupInspo"]
     return " ".join(tokens[:8])
+
+
+def brand_product_label(brand: str, product: str) -> str:
+    brand_clean = text_value(brand)
+    product_clean = text_value(product)
+    if not brand_clean:
+        return product_clean
+    if product_clean.lower().startswith(brand_clean.lower()):
+        return product_clean
+    return f"{brand_clean} {product_clean}".strip()
 
 
 async def generate_payload(fields: dict[str, Any], settings: Settings) -> tuple[GenerationPayload, str]:
