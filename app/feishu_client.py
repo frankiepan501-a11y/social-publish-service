@@ -18,6 +18,15 @@ DATETIME_FIELD_NAMES = {
     "实际发布时间",
 }
 
+URL_FIELD_NAMES = {
+    "AI生成图链接",
+    "public_asset_url",
+    "素材链接",
+    "目标链接",
+    "前台链接",
+    "主图URL",
+}
+
 
 def _datetime_to_ms(value: Any) -> Any:
     if value in ("", None):
@@ -49,11 +58,26 @@ def _datetime_to_ms(value: Any) -> Any:
     return int(parsed.timestamp() * 1000)
 
 
+def _url_text_to_link(value: Any) -> Any:
+    if value in ("", None):
+        return value
+    if not isinstance(value, str):
+        return value
+    raw = value.strip()
+    if not raw.lower().startswith(("http://", "https://")):
+        return value
+    first_url = raw.splitlines()[0].strip()
+    return {"link": first_url, "text": raw}
+
+
 def _normalize_bitable_fields(fields: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(fields)
     for name in DATETIME_FIELD_NAMES:
         if name in normalized:
             normalized[name] = _datetime_to_ms(normalized[name])
+    for name in URL_FIELD_NAMES:
+        if name in normalized:
+            normalized[name] = _url_text_to_link(normalized[name])
     return normalized
 
 

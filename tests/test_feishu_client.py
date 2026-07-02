@@ -17,3 +17,20 @@ class FeishuClientTests(unittest.TestCase):
         self.assertEqual(normalized["发生时间"], 1782967560000)
         self.assertEqual(normalized["Caption EN"], "hello")
         self.assertEqual(fields["AI生成时间"], "2026-07-02 04:46:52")
+
+    def test_normalize_bitable_fields_converts_url_style_text_fields(self):
+        fields = {
+            "AI生成图链接": "https://example.com/image.png",
+            "主图URL": "",
+            "Caption EN": "https://example.com should stay plain here",
+        }
+
+        normalized = _normalize_bitable_fields(fields)
+
+        self.assertEqual(
+            normalized["AI生成图链接"],
+            {"link": "https://example.com/image.png", "text": "https://example.com/image.png"},
+        )
+        self.assertEqual(normalized["主图URL"], "")
+        self.assertEqual(normalized["Caption EN"], "https://example.com should stay plain here")
+        self.assertEqual(fields["AI生成图链接"], "https://example.com/image.png")
