@@ -109,6 +109,22 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertIn("Use the attached product reference image", user)
         self.assertIn("Preserve the exact product shape", user)
 
+    def test_build_prompt_hides_ip_inspired_internal_model_names(self):
+        _system, user = build_prompt(
+            fields(
+                **{
+                    "品牌": "FUNLAB",
+                    "产品名": "FUNLAB YS11 Pro Controller - Abstract Wave",
+                    "产品库型号英文名": "Zonai",
+                    "产品库适配IP/IP联想": "Kakariko-inspired pattern",
+                    "产品库IP合规状态": "合规-无IP",
+                }
+            )
+        )
+        self.assertIn("FUNLAB YS11 Pro Controller - Abstract Wave", user)
+        self.assertNotIn("Zonai", user)
+        self.assertNotIn("Kakariko", user)
+
     def test_validate_generation_payload_blocks_missing_fields(self):
         payload = replace(fallback_generation(fields()), caption_en="", hashtags_en="GamingSetup", risk_level="maybe")
         issues = validate_generation_payload(payload)
@@ -120,6 +136,21 @@ class GenerationRulesTest(unittest.TestCase):
         payload = replace(fallback_generation(fields()), caption_en="Official Mario setup gear for your desk.")
         issues = validate_generation_payload(payload)
         self.assertIn("CAPTION_BLOCK_TERM:mario", issues)
+
+    def test_validate_generation_payload_blocks_ip_inspired_public_terms(self):
+        payload = replace(
+            fallback_generation(fields()),
+            caption_en="The Zonai pattern stays hidden until you power on.",
+            hashtags_en="#HiddenGlow #Zonai #GamingSetup",
+            image_prompt=(
+                "Use the attached product reference image and preserve the exact product. "
+                "Low-light desk scene with a Zonai-inspired pattern, no text, no new logo overlay, no watermark."
+            ),
+        )
+        issues = validate_generation_payload(payload, fields())
+        self.assertIn("CAPTION_BLOCK_TERM:zonai", issues)
+        self.assertIn("HASHTAG_BLOCK_TERM:zonai", issues)
+        self.assertIn("IMAGE_PROMPT_BLOCK_TERM:zonai", issues)
 
     def test_validate_generation_payload_blocks_image_prompt_logo_instruction(self):
         payload = replace(

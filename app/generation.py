@@ -15,10 +15,15 @@ from .rules import bool_value, multi_value, select_value, text_value
 GENERATION_VERSION = "fb-ig-gen-v1.1"
 
 GENERATION_BLOCK_TERMS = (
+    "among us",
+    "kakariko",
     "mario",
+    "minecraft",
     "pokemon",
     "piranha plant",
+    "super smash",
     "zelda",
+    "zonai",
     "nintendo official",
     "razer",
     "8bitdo",
@@ -239,11 +244,11 @@ def build_prompt(fields: dict[str, Any]) -> tuple[str, str]:
     material_type = select_value(fields.get("素材类型")) or "single_image"
     selling_points = text_value(fields.get("主推卖点")) or "one clear practical benefit"
     product_brief = text_value(fields.get("产品库产品简述"))
-    series_en = text_value(fields.get("产品库系列英文名") or fields.get("系列英文名"))
-    model_en = text_value(fields.get("产品库型号英文名") or fields.get("型号英文名"))
+    series_en = safe_public_context(fields.get("产品库系列英文名") or fields.get("系列英文名"))
+    model_en = safe_public_context(fields.get("产品库型号英文名") or fields.get("型号英文名"))
     ip_status = funlab_ip_compliance_status(fields)
     ip_note = text_value(fields.get("产品库IP合规备注") or fields.get("IP合规备注"))
-    ip_association = text_value(fields.get("产品库适配IP/IP联想") or fields.get("适配IP/IP联想"))
+    ip_association = safe_public_context(fields.get("产品库适配IP/IP联想") or fields.get("适配IP/IP联想"))
     reference_available = has_product_reference_image(fields)
     target_url = text_value(fields.get("目标链接"))
     offer = "yes" if bool_value(fields.get("权益内容")) else "no"
@@ -302,6 +307,7 @@ def build_prompt(fields: dict[str, Any]) -> tuple[str, str]:
             "Do not create more than one experiment variable.",
             "Image prompt must not ask to render new logos, text overlays, watermarks, or unauthorized IP characters.",
             "Preserve only logos or markings already visible in the reference image.",
+            "Do not expose internal IP-inspired model names or protected game-world terms in caption, hashtags, or image prompt.",
         ],
     }
     return system, json.dumps(user, ensure_ascii=False, indent=2)
@@ -452,6 +458,16 @@ def normalize_hashtags(raw: str) -> str:
     return " ".join(tokens[:8])
 
 
+def contains_generation_block_term(raw: Any) -> bool:
+    text = text_value(raw).lower()
+    return any(term in text for term in GENERATION_BLOCK_TERMS)
+
+
+def safe_public_context(raw: Any) -> str:
+    value = text_value(raw)
+    return "" if contains_generation_block_term(value) else value
+
+
 def brand_product_label(brand: str, product: str) -> str:
     brand_clean = text_value(brand)
     product_clean = text_value(product)
@@ -503,6 +519,11 @@ def validate_generation_payload(payload: GenerationPayload, source_fields: dict[
     for term in GENERATION_BLOCK_TERMS:
         if term in caption_lower:
             issues.append(f"CAPTION_BLOCK_TERM:{term}")
+
+    hashtags_lower = payload.hashtags_en.lower()
+    for term in GENERATION_BLOCK_TERMS:
+        if term in hashtags_lower:
+            issues.append(f"HASHTAG_BLOCK_TERM:{term}")
 
     image_lower = payload.image_prompt.lower()
     has_no_text_guard = any(marker in image_lower for marker in ("no text", "without text", "avoid text"))
