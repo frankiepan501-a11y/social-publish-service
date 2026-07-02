@@ -210,12 +210,53 @@ def check_inline_image_task_scan(args: argparse.Namespace) -> dict[str, Any]:
     return data
 
 
+def check_inline_image_result_ingest_scan(args: argparse.Namespace) -> dict[str, Any]:
+    payload = {
+        "write_back": False,
+        "source": "manual",
+        "force": False,
+        "limit": 10,
+        "records": [
+            {
+                "record_id": "readiness_img_ingest_ok",
+                "fields": {
+                    **FIXTURE_FIELDS,
+                    "状态": "待审核",
+                    "图片任务record_id": "readiness_worker_task",
+                    "图片生成状态": "已提交",
+                },
+                "image_task_record_id": "readiness_worker_task",
+                "image_task_record": {
+                    "fields": {
+                        "状态": "处理成功",
+                        "生成图片位置": "https://u1wpma3xuhr.feishu.cn/drive/folder/folder_token/readiness.png",
+                        "生成图片file_token": "readiness_file_token",
+                    }
+                },
+            }
+        ],
+    }
+    status, data = request_json("POST", args.url, "/image-task/ingest-scan", token=args.token, payload=payload)
+    require(status == 200, f"/image-task/ingest-scan expected HTTP 200, got {status}: {data}")
+    require(data.get("ok") is True, f"/image-task/ingest-scan returned ok!=true: {data}")
+    require(data.get("status") == "image-ingest-scan-complete", f"expected image-ingest-scan-complete: {data}")
+    require(str(data.get("scan_run_id", "")).startswith("imgingestscanv1-"), f"missing imgingestscanv1 scan_run_id: {data}")
+    require(data.get("selected") == 1, f"expected one selected image ingest record: {data}")
+    first = (data.get("results") or [{}])[0]
+    require(first.get("record_id") == "readiness_img_ingest_ok", f"missing image ingest record_id readiness_img_ingest_ok: {data}")
+    fields = first.get("fields") or {}
+    require(fields.get("图片生成状态") == "已生成-待转URL", f"image ingest result missing status mapping: {data}")
+    require(fields.get("生成图片file_token") == "readiness_file_token", f"image ingest result missing file token mapping: {data}")
+    return data
+
+
 def main() -> int:
     args = parse_args()
     require(bool(args.url.strip()), "--url or SOCIAL_PUBLISH_SERVICE_URL is required")
     health = check_health(args)
     scan = check_inline_generation(args)
     image_scan = check_inline_image_task_scan(args)
+    image_ingest_scan = check_inline_image_result_ingest_scan(args)
     gate = check_writeback_gate_disabled(args)
     report = {
         "ok": True,
@@ -224,6 +265,7 @@ def main() -> int:
             "health": True,
             "inline_generate_scan": True,
             "inline_image_task_scan": True,
+            "inline_image_result_ingest_scan": True,
             "writeback_gate_checked": gate is not None,
             "publish_commit_gate_safe": health.get("commit_enabled") is False or args.allow_publish_commit_enabled,
             "image_task_write_gate_safe": health.get("image_task_write_enabled") is False,
@@ -248,6 +290,8 @@ def main() -> int:
         "first_run_id": (scan.get("results") or [{}])[0].get("run_id"),
         "image_scan_run_id": image_scan.get("scan_run_id"),
         "first_image_run_id": (image_scan.get("results") or [{}])[0].get("run_id"),
+        "image_ingest_scan_run_id": image_ingest_scan.get("scan_run_id"),
+        "first_image_ingest_run_id": (image_ingest_scan.get("results") or [{}])[0].get("run_id"),
     }
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     print(rendered)

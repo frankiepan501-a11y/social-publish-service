@@ -13,6 +13,15 @@ class PublishRequest(BaseModel):
     now: str | None = None
 
 
+class PublishScanRequest(BaseModel):
+    records: list[dict[str, Any]] = Field(default_factory=list)
+    commit: bool = False
+    source: Literal["auto", "manual", "replay"] = "auto"
+    force: bool = False
+    limit: int = Field(default=10, ge=1, le=50)
+    now: str | None = None
+
+
 class GenerateBriefRequest(BaseModel):
     record_id: str | None = None
     record: dict[str, Any] | None = None
@@ -52,6 +61,14 @@ class ImageResultIngestRequest(BaseModel):
     image_task_record: dict[str, Any] | None = None
     write_back: bool = False
     source: Literal["auto", "manual", "replay"] = "auto"
+
+
+class ImageResultIngestScanRequest(BaseModel):
+    records: list[dict[str, Any]] = Field(default_factory=list)
+    write_back: bool = False
+    source: Literal["auto", "manual", "replay"] = "auto"
+    force: bool = False
+    limit: int = Field(default=10, ge=1, le=50)
 
 
 class ReplayRequest(BaseModel):

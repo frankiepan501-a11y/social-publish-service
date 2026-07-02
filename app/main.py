@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import secrets
@@ -19,8 +19,9 @@ from .generation import (
     validate_generation_payload,
 )
 from .meta_client import MetaApiError, MetaClient
-from .models import GenerateBriefRequest, GenerateScanRequest, InsightsPollRequest, PublishRequest, ReplayRequest
+from .models import GenerateBriefRequest, GenerateScanRequest, InsightsPollRequest, PublishRequest, PublishScanRequest, ReplayRequest
 from .models import ImageResultIngestRequest, ImageTaskRequest, ImageTaskScanRequest
+from .models import ImageResultIngestScanRequest
 from .rules import (
     AccountConfig,
     MODE_AUTO,
@@ -28,7 +29,9 @@ from .rules import (
     PLATFORM_INSTAGRAM,
     collect_single_asset_file_tokens,
     validate_publish,
+    bool_value,
     normalize_fields,
+    parse_dt,
     select_value,
     text_value,
 )
@@ -234,6 +237,20 @@ def _image_task_candidate_reason(fields: dict, *, force: bool = False) -> tuple[
     return True, "candidate"
 
 
+def _image_result_ingest_candidate_reason(fields: dict, *, force: bool = False) -> tuple[bool, str]:
+    if force:
+        return True, "candidate-forced"
+    task_record_id = text_value(fields.get("图片任务record_id"))
+    if not task_record_id:
+        return False, "image_task_record_id missing"
+    status = select_value(fields.get("图片生成状态"))
+    if status == "已转发布URL":
+        return False, "image_result_already_public"
+    if text_value(fields.get("AI生成图链接")) and text_value(fields.get("生成图片file_token")):
+        return False, "image_result_already_ingested"
+    return True, "candidate"
+
+
 def _extract_image_result_fields(image_task_record_id: str, image_task_fields: dict) -> tuple[dict, list[str]]:
     status = select_value(image_task_fields.get("状态"))
     file_token = text_value(image_task_fields.get("生成图片file_token"))
@@ -426,6 +443,87 @@ async def _execute_image_task_scan(req: ImageTaskScanRequest, settings: Settings
         "created": created,
         "failed": failed,
         "write_task": req.write_task,
+        "results": results,
+        "skipped_sample": skipped[:20],
+    }
+
+
+async def _execute_image_result_ingest_scan(req: ImageResultIngestScanRequest, settings: Settings) -> dict:
+    scan_run_id = f"imgingestscanv1-{uuid.uuid4().hex[:16]}"
+    records = req.records
+    if not records:
+        client = _feishu(settings)
+        if client is None:
+            raise HTTPException(status_code=503, detail="Feishu env is not configured")
+        records = await client.list_records(settings.content_table_id, page_size=200)
+
+    selected = []
+    skipped = []
+    for index, record in enumerate(records):
+        fields = normalize_fields(record)
+        ok, reason = _image_result_ingest_candidate_reason(fields, force=req.force)
+        record_id = record.get("record_id") or f"inline-{index}"
+        if ok:
+            selected.append((record_id, record))
+        else:
+            skipped.append({"record_id": record_id, "reason": reason})
+        if len(selected) >= req.limit:
+            break
+
+    results = []
+    for record_id, record in selected:
+        item = await _execute_image_result_ingest(
+            ImageResultIngestRequest(
+                record_id=record_id,
+                record=record,
+                image_task_record_id=record.get("image_task_record_id"),
+                image_task_record=record.get("image_task_record"),
+                write_back=req.write_back,
+                source=req.source,
+            ),
+            settings=settings,
+        )
+        item["record_id"] = record_id
+        results.append(item)
+
+    ingested = sum(1 for item in results if item.get("ok"))
+    failed = sum(1 for item in results if not item.get("ok"))
+    summary = {
+        "scanned": len(records),
+        "selected": len(selected),
+        "ingested": ingested,
+        "failed": failed,
+        "write_back": req.write_back,
+        "source": req.source,
+        "force": req.force,
+        "limit": req.limit,
+        "skipped_sample": skipped[:5],
+    }
+    scan_hash = hashlib.sha256(json.dumps(summary, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    await _write_log(
+        settings,
+        run_id=scan_run_id,
+        record_id="__image_ingest_scan__",
+        node="image-task/ingest-scan",
+        status="success" if failed == 0 else "error",
+        input_hash=scan_hash,
+        output_summary=json.dumps(summary, ensure_ascii=False, default=str),
+        decision_reason="image-ingest-scan-complete",
+        mode="commit" if req.write_back else "dry-run",
+        replay_command=(
+            'POST /image-task/ingest-scan '
+            f'{{"write_back":false,"source":"replay","force":{str(req.force).lower()},"limit":{req.limit}}}'
+        ),
+    )
+    return {
+        "ok": all(item.get("ok") for item in results) if results else True,
+        "status": "image-ingest-scan-complete",
+        "scan_run_id": scan_run_id,
+        "scanned": len(records),
+        "selected": len(selected),
+        "ingested": ingested,
+        "failed": failed,
+        "write_back": req.write_back,
         "results": results,
         "skipped_sample": skipped[:20],
     }
@@ -706,6 +804,120 @@ async def _execute_publish(req: PublishRequest, *, commit: bool, settings: Setti
     if client is not None and record_id != "inline":
         await client.update_record(settings.content_table_id, record_id, update)
     return {"ok": True, "status": "published", "run_id": run_id, "platform": account.platform, "result": update}
+
+
+def _publish_scan_candidate_reason(fields: dict, *, now: datetime, force: bool = False) -> tuple[bool, str]:
+    if force:
+        return True, "candidate-forced"
+    status = select_value(fields.get("状态"))
+    if status != "待发布":
+        return False, f"status={status or 'empty'}"
+    mode = select_value(fields.get("发布模式"))
+    if mode == "manual":
+        return False, "mode=manual"
+    if bool_value(fields.get("发布锁")):
+        return False, "publish_locked"
+    if not bool_value(fields.get("审批通过")):
+        return False, "approval_missing"
+    if not bool_value(fields.get("最终素材确认")):
+        return False, "asset_not_confirmed"
+    scheduled_at = parse_dt(fields.get("计划发布时间"))
+    if not scheduled_at:
+        return False, "schedule_missing"
+    if scheduled_at.tzinfo is None:
+        scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
+    if scheduled_at > now + timedelta(minutes=1):
+        return False, "schedule_not_due"
+    return True, "candidate"
+
+
+async def _execute_publish_scan(req: PublishScanRequest, settings: Settings) -> dict:
+    scan_run_id = f"pscanv1-{uuid.uuid4().hex[:16]}"
+    now = _parse_now(req.now)
+    records = req.records
+    if not records:
+        client = _feishu(settings)
+        if client is None:
+            raise HTTPException(status_code=503, detail="Feishu env is not configured")
+        records = await client.list_records(settings.content_table_id, page_size=200)
+
+    selected = []
+    skipped = []
+    for index, record in enumerate(records):
+        fields = normalize_fields(record)
+        ok, reason = _publish_scan_candidate_reason(fields, now=now, force=req.force)
+        record_id = record.get("record_id") or f"inline-{index}"
+        if ok:
+            selected.append((record_id, record))
+        else:
+            skipped.append({"record_id": record_id, "reason": reason})
+        if len(selected) >= req.limit:
+            break
+
+    results = []
+    for record_id, record in selected:
+        dry_run = await _execute_publish(
+            PublishRequest(record_id=record_id, record=record, recent_records=records, now=req.now),
+            commit=False,
+            settings=settings,
+        )
+        item = {"record_id": record_id, "dry_run": dry_run}
+        if req.commit and dry_run.get("ok"):
+            item["commit"] = await _execute_publish(
+                PublishRequest(record_id=record_id, record=record, recent_records=records, now=req.now),
+                commit=True,
+                settings=settings,
+            )
+        results.append(item)
+
+    dry_run_passed = sum(1 for item in results if item.get("dry_run", {}).get("ok"))
+    committed = sum(1 for item in results if item.get("commit", {}).get("ok"))
+    failed = sum(
+        1
+        for item in results
+        if not item.get("dry_run", {}).get("ok") or (req.commit and not item.get("commit", {}).get("ok"))
+    )
+    summary = {
+        "scanned": len(records),
+        "selected": len(selected),
+        "dry_run_passed": dry_run_passed,
+        "committed": committed,
+        "failed": failed,
+        "commit": req.commit,
+        "source": req.source,
+        "force": req.force,
+        "limit": req.limit,
+        "skipped_sample": skipped[:5],
+    }
+    scan_hash = hashlib.sha256(json.dumps(summary, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    await _write_log(
+        settings,
+        run_id=scan_run_id,
+        record_id="__publish_scan__",
+        node="publish/scan",
+        status="success" if failed == 0 else "error",
+        input_hash=scan_hash,
+        output_summary=json.dumps(summary, ensure_ascii=False, default=str),
+        decision_reason="publish-scan-complete",
+        mode="commit" if req.commit else "dry-run",
+        replay_command=(
+            'POST /publish/scan '
+            f'{{"commit":false,"source":"replay","force":{str(req.force).lower()},"limit":{req.limit}}}'
+        ),
+    )
+    return {
+        "ok": failed == 0,
+        "status": "publish-scan-complete",
+        "scan_run_id": scan_run_id,
+        "scanned": len(records),
+        "selected": len(selected),
+        "dry_run_passed": dry_run_passed,
+        "committed": committed,
+        "failed": failed,
+        "commit": req.commit,
+        "results": results,
+        "skipped_sample": skipped[:20],
+    }
 
 
 async def _mark_generation_error(settings: Settings, record_id: str, run_id: str, message: str) -> None:
@@ -1016,6 +1228,26 @@ async def image_task_ingest(
 ):
     _check_auth(settings, authorization)
     return await _execute_image_result_ingest(req, settings=settings)
+
+
+@app.post("/image-task/ingest-scan")
+async def image_task_ingest_scan(
+    req: ImageResultIngestScanRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_image_result_ingest_scan(req, settings=settings)
+
+
+@app.post("/publish/scan")
+async def publish_scan(
+    req: PublishScanRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_publish_scan(req, settings=settings)
 
 
 @app.post("/publish/dry-run")

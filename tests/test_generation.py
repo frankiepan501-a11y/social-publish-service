@@ -16,6 +16,7 @@ from app.generation import (
     validate_generation_payload,
 )
 from app.main import app
+from app.rules import AccountConfig
 
 
 def fields(**overrides):
@@ -35,6 +36,38 @@ def fields(**overrides):
     }
     base.update(overrides)
     return base
+
+
+def publish_ready_fields(**overrides):
+    base = fields(
+        **{
+            "状态": "待发布",
+            "发布模式": "auto",
+            "计划发布账号": "Powkong IG",
+            "计划发布时间": "2026-07-01 10:00:00",
+            "审批通过": True,
+            "最终素材确认": True,
+            "Caption EN": "Keep your desk clean with a compact charging setup.",
+            "主图URL": "https://cdn.example.com/powkong-desk.png",
+        }
+    )
+    base.update(overrides)
+    return base
+
+
+def publish_account():
+    return AccountConfig(
+        account_name="Powkong IG",
+        brand="Powkong",
+        platform="Instagram",
+        publish_slots=["IG Feed"],
+        ig_user_id="ig-user-1",
+        daily_limit=1,
+        weekly_limit=3,
+        min_interval_hours=36,
+        enabled=True,
+        default_mode="auto",
+    )
 
 
 class GenerationRulesTest(unittest.TestCase):
@@ -249,6 +282,172 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertEqual(body["created"], 1)
         self.assertEqual(body["results"][0]["record_id"], "rec_img_ok")
         self.assertEqual(body["skipped_sample"][0]["record_id"], "rec_img_skip")
+
+    def test_image_result_ingest_scan_selects_pending_task_records(self):
+        client = TestClient(app)
+        with patch.object(main_module, "_execute_image_result_ingest", new_callable=AsyncMock) as ingest:
+            ingest.return_value = {"ok": True, "status": "image-result-ready", "run_id": "imgresultv1-test"}
+            resp = client.post(
+                "/image-task/ingest-scan",
+                json={
+                    "records": [
+                        {
+                            "record_id": "rec_pending",
+                            "fields": fields(
+                                **{
+                                    "图片任务record_id": "rec_worker",
+                                    "图片生成状态": "已提交",
+                                }
+                            ),
+                        },
+                        {
+                            "record_id": "rec_done",
+                            "fields": fields(
+                                **{
+                                    "图片任务record_id": "rec_worker_done",
+                                    "图片生成状态": "已转发布URL",
+                                    "AI生成图链接": "https://cdn.example.com/image.png",
+                                    "生成图片file_token": "filetoken_done",
+                                }
+                            ),
+                        },
+                    ],
+                    "write_back": False,
+                    "limit": 10,
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["selected"], 1)
+        self.assertEqual(body["ingested"], 1)
+        self.assertEqual(body["results"][0]["record_id"], "rec_pending")
+        self.assertEqual(body["skipped_sample"][0]["record_id"], "rec_done")
+        self.assertEqual(body["skipped_sample"][0]["reason"], "image_result_already_public")
+        ingest.assert_awaited_once()
+        self.assertFalse(ingest.await_args.args[0].write_back)
+
+    def test_image_result_ingest_scan_inline_worker_record_maps_file_token(self):
+        client = TestClient(app)
+        resp = client.post(
+            "/image-task/ingest-scan",
+            json={
+                "records": [
+                    {
+                        "record_id": "rec_pending",
+                        "fields": fields(
+                            **{
+                                "图片任务record_id": "rec_worker",
+                                "图片生成状态": "已提交",
+                            }
+                        ),
+                        "image_task_record_id": "rec_worker",
+                        "image_task_record": {
+                            "fields": {
+                                "状态": "处理成功",
+                                "生成图片位置": "https://u1wpma3xuhr.feishu.cn/drive/folder/folder_token/image.png",
+                                "生成图片file_token": "filetoken_456",
+                            }
+                        },
+                    }
+                ],
+                "write_back": False,
+                "limit": 10,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["selected"], 1)
+        fields_out = body["results"][0]["fields"]
+        self.assertEqual(fields_out["图片生成状态"], "已生成-待转URL")
+        self.assertEqual(fields_out["生成图片file_token"], "filetoken_456")
+
+    def test_image_result_ingest_scan_failed_result_includes_record_id(self):
+        client = TestClient(app)
+        with patch.object(main_module, "_execute_image_result_ingest", new_callable=AsyncMock) as ingest:
+            ingest.return_value = {
+                "ok": False,
+                "status": "blocked",
+                "run_id": "imgresultv1-test",
+                "blocking": [{"code": "IMAGE_RESULT_WRITEBACK_DISABLED"}],
+            }
+            resp = client.post(
+                "/image-task/ingest-scan",
+                json={
+                    "records": [
+                        {
+                            "record_id": "rec_pending",
+                            "fields": fields(
+                                **{
+                                    "图片任务record_id": "rec_worker",
+                                    "图片生成状态": "已提交",
+                                }
+                            ),
+                        }
+                    ],
+                    "write_back": True,
+                    "limit": 10,
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["selected"], 1)
+        self.assertEqual(body["failed"], 1)
+        self.assertEqual(body["results"][0]["record_id"], "rec_pending")
+        self.assertEqual(body["results"][0]["blocking"][0]["code"], "IMAGE_RESULT_WRITEBACK_DISABLED")
+        self.assertTrue(ingest.await_args.args[0].write_back)
+
+    def test_publish_scan_selects_due_records_and_runs_dry_run(self):
+        client = TestClient(app)
+        with patch.object(main_module, "_load_account", new_callable=AsyncMock) as load_account:
+            load_account.return_value = publish_account()
+            resp = client.post(
+                "/publish/scan",
+                json={
+                    "records": [
+                        {"record_id": "rec_due", "fields": publish_ready_fields()},
+                        {
+                            "record_id": "rec_future",
+                            "fields": publish_ready_fields(**{"计划发布时间": "2026-07-02 10:00:00"}),
+                        },
+                        {"record_id": "rec_unapproved", "fields": publish_ready_fields(**{"审批通过": False})},
+                    ],
+                    "commit": False,
+                    "now": "2026-07-01T10:00:00+00:00",
+                    "limit": 10,
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["selected"], 1)
+        self.assertEqual(body["dry_run_passed"], 1)
+        self.assertEqual(body["results"][0]["record_id"], "rec_due")
+        self.assertEqual(body["results"][0]["dry_run"]["status"], "dry-run-pass")
+        self.assertEqual(body["skipped_sample"][0]["record_id"], "rec_future")
+        self.assertEqual(body["skipped_sample"][0]["reason"], "schedule_not_due")
+
+    def test_publish_scan_commit_still_obeys_commit_gate(self):
+        client = TestClient(app)
+        with patch.object(main_module, "_load_account", new_callable=AsyncMock) as load_account:
+            load_account.return_value = publish_account()
+            resp = client.post(
+                "/publish/scan",
+                json={
+                    "records": [{"record_id": "rec_due", "fields": publish_ready_fields()}],
+                    "commit": True,
+                    "now": "2026-07-01T10:00:00+00:00",
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["selected"], 1)
+        self.assertEqual(body["dry_run_passed"], 1)
+        self.assertEqual(body["failed"], 1)
+        self.assertEqual(body["results"][0]["commit"]["blocking"][0]["code"], "COMMIT_DISABLED")
 
     def test_generate_writeback_requires_explicit_gate(self):
         client = TestClient(app)

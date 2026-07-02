@@ -41,6 +41,7 @@ Image task bridge:
 - `POST /image-task/create` builds one Codex Image Worker task payload from a content calendar record.
 - `POST /image-task/scan` selects records with `AI图片Prompt`, `图片生成模式=Codex Image`, and no existing `图片任务record_id`, then calls the same task builder.
 - `POST /image-task/ingest` maps a worker result back to content fields such as `图片生成状态`, `生成图片file_token`, and `AI生成图链接`.
+- `POST /image-task/ingest-scan` selects content records that already have `图片任务record_id` but do not yet have a complete image result, then calls the same ingest path per record.
 - The Codex Image Worker remains a local POC. The service only creates/reads Feishu task records after explicit gates are opened.
 - Feishu Drive folder URLs are not treated as publishable FB/IG image URLs. Prefer `生成图片file_token`; commit can convert it to a Meta-hosted URL only when `SOCIAL_ASSET_PREPARE_ENABLED=true`.
 
@@ -91,7 +92,7 @@ Full local preflight from repo root:
 powershell -ExecutionPolicy Bypass -File tools\fb_ig_ops\preflight_content_generation_chain.ps1
 ```
 
-This preflight checks unit tests, local generation smoke, Python compile, n8n draft JSON for content generation, image task, and publishing, inactive workflow status, expected service endpoints, image worker handoff, Base schema shape, sensitive-looking strings, and then clears Python cache.
+This preflight checks unit tests, local generation smoke, Python compile, n8n draft JSON for content generation, image task, image result ingest, and publishing, inactive workflow status, expected service endpoints, image worker handoff, Base schema shape, sensitive-looking strings, and then clears Python cache.
 
 Smoke against a running service, still without writing Feishu:
 
@@ -107,7 +108,7 @@ python scripts/remote_generation_readiness.py --url https://<service-domain>
 python scripts/remote_generation_readiness.py
 ```
 
-This checks `/health`, verifies `SOCIAL_PUBLISH_COMMIT_ENABLED=false`, verifies the generation/image write gates and asset preparation gate are closed, requires Feishu env to be configured for service-side Base scan, runs inline `/generate/scan` and `/image-task/scan` dry-runs, and confirms `write_back=true` is blocked by `GENERATION_WRITEBACK_DISABLED`. Use `--allow-feishu-unconfigured` only for an inline-only smoke test before Feishu env is attached.
+This checks `/health`, verifies `SOCIAL_PUBLISH_COMMIT_ENABLED=false`, verifies the generation/image write gates and asset preparation gate are closed, requires Feishu env to be configured for service-side Base scan, runs inline `/generate/scan`, `/image-task/scan`, and `/image-task/ingest-scan` dry-runs, and confirms `write_back=true` is blocked by `GENERATION_WRITEBACK_DISABLED`. Use `--allow-feishu-unconfigured` only for an inline-only smoke test before Feishu env is attached.
 
 Optional evidence file:
 
