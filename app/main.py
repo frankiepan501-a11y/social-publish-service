@@ -1407,7 +1407,7 @@ def _image_task_candidate_reason(fields: dict, *, force: bool = False) -> tuple[
     if ip_issue:
         return False, ip_issue
     task_status = select_value(fields.get("图片生成状态"))
-    if task_status in {"已提交", "生成中", "已生成-待转URL", "已转发布URL"} and not force:
+    if task_status in {"已提交", "生成中", "已生成-待转URL", "已转发布URL", "失败"} and not force:
         return False, f"image_status={task_status}"
     if text_value(fields.get("图片任务record_id")) and not force:
         return False, "image_task_record_id exists"
@@ -1423,12 +1423,15 @@ def _image_result_ingest_candidate_reason(fields: dict, *, force: bool = False) 
     status = select_value(fields.get("图片生成状态"))
     if status == "已转发布URL":
         return False, "image_result_already_public"
+    if status == "失败":
+        return False, "image_result_failed"
     if text_value(fields.get("AI生成图链接")) and text_value(fields.get("生成图片file_token")):
         return False, "image_result_already_ingested"
     return True, "candidate"
 
 
 PENDING_IMAGE_TASK_STATUSES = {"empty", "待处理", "已提交", "生成中", "处理中", "pending", "running"}
+FAILED_IMAGE_TASK_STATUSES = {"失败", "处理失败", "failed", "error"}
 
 
 def _is_pending_image_result(item: dict) -> bool:
@@ -1457,6 +1460,14 @@ def _extract_image_result_fields(image_task_record_id: str, image_task_fields: d
     public_url = text_value(image_task_fields.get("public_asset_url")) or text_value(image_task_fields.get("生成图片URL"))
     location = text_value(image_task_fields.get("生成图片位置"))
     error_message = text_value(image_task_fields.get("错误信息"))
+    if status in FAILED_IMAGE_TASK_STATUSES:
+        updates = {
+            "图片任务record_id": image_task_record_id,
+            "图片生成状态": "失败",
+            "图片生成错误": error_message or f"image task status={status}",
+        }
+        return updates, []
+
     blocking = []
     if status not in {"处理成功", "已完成", "success"}:
         blocking.append(f"IMAGE_TASK_NOT_DONE:{status or 'empty'}")

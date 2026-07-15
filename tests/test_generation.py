@@ -528,6 +528,35 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertEqual(body["results"][0]["record_id"], "rec_img_ok")
         self.assertEqual(body["skipped_sample"][0]["record_id"], "rec_img_skip")
 
+    def test_image_task_scan_skips_terminal_failed_image_status(self):
+        client = TestClient(app)
+        resp = client.post(
+            "/image-task/scan",
+            json={
+                "records": [
+                    {
+                        "record_id": "rec_img_failed",
+                        "fields": fields(
+                            **{
+                                "状态": "待审核",
+                                "AI图片Prompt": "Product-first bright desk setup, no text, no logo, no watermark.",
+                                "图片生成模式": "Codex Image",
+                                "图片生成状态": "失败",
+                            }
+                        ),
+                    }
+                ],
+                "write_task": False,
+                "limit": 10,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["selected"], 0)
+        self.assertEqual(body["created"], 0)
+        self.assertEqual(body["skipped_sample"][0]["reason"], "image_status=失败")
+
     def test_image_result_ingest_scan_selects_pending_task_records(self):
         client = TestClient(app)
         with patch.object(main_module, "_execute_image_result_ingest", new_callable=AsyncMock) as ingest:
@@ -572,6 +601,37 @@ class GenerationRulesTest(unittest.TestCase):
         ingest.assert_awaited_once()
         self.assertFalse(ingest.await_args.args[0].write_back)
 
+    def test_image_result_ingest_scan_skips_terminal_failed_content_status(self):
+        client = TestClient(app)
+        with patch.object(main_module, "_execute_image_result_ingest", new_callable=AsyncMock) as ingest:
+            resp = client.post(
+                "/image-task/ingest-scan",
+                json={
+                    "records": [
+                        {
+                            "record_id": "rec_failed",
+                            "fields": fields(
+                                **{
+                                    "图片任务record_id": "rec_worker_failed",
+                                    "图片生成状态": "失败",
+                                    "图片生成错误": "manual queue cleanup",
+                                }
+                            ),
+                        }
+                    ],
+                    "write_back": False,
+                    "limit": 10,
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["selected"], 0)
+        self.assertEqual(body["ingested"], 0)
+        self.assertEqual(body["failed"], 0)
+        self.assertEqual(body["skipped_sample"][0]["reason"], "image_result_failed")
+        ingest.assert_not_awaited()
+
     def test_image_result_ingest_scan_inline_worker_record_maps_file_token(self):
         client = TestClient(app)
         resp = client.post(
@@ -607,6 +667,43 @@ class GenerationRulesTest(unittest.TestCase):
         fields_out = body["results"][0]["fields"]
         self.assertEqual(fields_out["图片生成状态"], "已生成-待转URL")
         self.assertEqual(fields_out["生成图片file_token"], "filetoken_456")
+
+    def test_image_result_ingest_scan_inline_worker_failure_maps_to_content_failure(self):
+        client = TestClient(app)
+        resp = client.post(
+            "/image-task/ingest-scan",
+            json={
+                "records": [
+                    {
+                        "record_id": "rec_pending",
+                        "fields": fields(
+                            **{
+                                "图片任务record_id": "rec_worker",
+                                "图片生成状态": "已提交",
+                            }
+                        ),
+                        "image_task_record_id": "rec_worker",
+                        "image_task_record": {
+                            "fields": {
+                                "状态": "失败",
+                                "错误信息": "worker test task archived",
+                            }
+                        },
+                    }
+                ],
+                "write_back": False,
+                "limit": 10,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["selected"], 1)
+        self.assertEqual(body["ingested"], 1)
+        self.assertEqual(body["failed"], 0)
+        fields_out = body["results"][0]["fields"]
+        self.assertEqual(fields_out["图片生成状态"], "失败")
+        self.assertEqual(fields_out["图片生成错误"], "worker test task archived")
 
     def test_image_result_ingest_scan_treats_worker_pending_as_noop(self):
         client = TestClient(app)
