@@ -103,9 +103,11 @@ Operational fixes:
 - 2026-07-15 FB/IG daily confirm writeback:
   - Problem: Feishu daily confirm card clicks returned failure cards and did not create content-calendar rows.
   - Root cause: Base datetime fields rejected numeric millisecond strings, number fields could receive string values, and legacy weekly-pool pillar `UGC` did not match the content-calendar option `UGC/KOL社证`.
-  - Fix: Bitable normalization now converts numeric datetime strings and numeric strings; weekly-pool `UGC` is mapped to `UGC/KOL社证`; Feishu writeback failures return a readable `FEISHU_WRITEBACK_FAILED` detail instead of an opaque 500.
+  - Additional root cause found during replay: weekly-pool writeback attempted to write content-calendar-only fields `日确认动作` and `日确认时间`, which do not exist in the weekly-pool table.
+  - Fix: Bitable normalization now converts numeric datetime strings and numeric strings; weekly-pool `UGC` is mapped to `UGC/KOL社证`; weekly-pool writeback is filtered to fields that exist in that table; Feishu writeback failures return a readable `FEISHU_WRITEBACK_FAILED` detail instead of an opaque 500.
   - Related n8n fix: workflow `YjTXaoWAcy89xZpT` node `FBIG Daily Confirm Reply` now stringifies object errors so failure cards no longer show `[object Object]`.
-  - Verification: full local `unittest discover -s tests` passed 92 tests; Zeabur deployment `6a573570f9e67eefe06603b1` is running commit `dca2707021fb7a5da35c71119d3cc7dba4732246`; production `/plan/reselect` dry-run returned `UGC/KOL社证`; production writeback smoke created content-calendar record `recvpqo3NoSsxh` with datetime and number fields normalized, then the test record was deleted.
+  - Verification: full local `unittest discover -s tests` passed 93 tests; Zeabur deployment from commit `7fdbb6b52ae0c7dc552991b713fc1c27a796782b` reached `RUNNING`; production `/plan/reselect` dry-run returned `UGC/KOL社证`; production writeback smoke created content-calendar record `recvpqo3NoSsxh` with datetime and number fields normalized, then the test record was deleted.
+  - Repair result: the three failed operator clicks were replayed after the fix. Weekly candidates `recvpekE9WTW10`, `recvpekFAUhUgq`, and `recvpekGWmMeCM` now have `日确认状态=已生成内容日历` and content-calendar records `recvpqrjw9m6vm`, `recvpqrmcpCqNy`, and `recvpqronWbHBx`.
 
 Required environment for production:
 - `SOCIAL_PUBLISH_API_TOKEN`
