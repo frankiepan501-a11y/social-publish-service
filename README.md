@@ -99,6 +99,14 @@ Replay:
 - `spv1-*` replays publish validation; `mode=commit` is still gated by record state, account config, Meta env, and `SOCIAL_PUBLISH_COMMIT_ENABLED`.
 - Generation replay is dry-run only. It cannot approve, confirm assets, publish, or write fields back.
 
+Operational fixes:
+- 2026-07-15 FB/IG daily confirm writeback:
+  - Problem: Feishu daily confirm card clicks returned failure cards and did not create content-calendar rows.
+  - Root cause: Base datetime fields rejected numeric millisecond strings, number fields could receive string values, and legacy weekly-pool pillar `UGC` did not match the content-calendar option `UGC/KOL社证`.
+  - Fix: Bitable normalization now converts numeric datetime strings and numeric strings; weekly-pool `UGC` is mapped to `UGC/KOL社证`; Feishu writeback failures return a readable `FEISHU_WRITEBACK_FAILED` detail instead of an opaque 500.
+  - Related n8n fix: workflow `YjTXaoWAcy89xZpT` node `FBIG Daily Confirm Reply` now stringifies object errors so failure cards no longer show `[object Object]`.
+  - Verification: full local `unittest discover -s tests` passed 92 tests; Zeabur deployment `6a573570f9e67eefe06603b1` is running commit `dca2707021fb7a5da35c71119d3cc7dba4732246`; production `/plan/reselect` dry-run returned `UGC/KOL社证`; production writeback smoke created content-calendar record `recvpqo3NoSsxh` with datetime and number fields normalized, then the test record was deleted.
+
 Required environment for production:
 - `SOCIAL_PUBLISH_API_TOKEN`
 - `SOCIAL_GENERATION_WRITEBACK_ENABLED`
