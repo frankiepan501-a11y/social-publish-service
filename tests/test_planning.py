@@ -334,6 +334,62 @@ class PlanningTest(unittest.TestCase):
         self.assertEqual(body["detail"]["code"], "FEISHU_WRITEBACK_FAILED")
         self.assertIn("field value type mismatch", body["detail"]["message"])
 
+    def test_confirm_generate_writeback_filters_weekly_pool_fields(self):
+        class RecordingPlanClient:
+            def __init__(self):
+                self.weekly_update_fields = None
+
+            async def create_record(self, table_id, fields):
+                return {"record": {"record_id": "rec_content"}}
+
+            async def update_record(self, table_id, record_id, fields):
+                self.weekly_update_fields = fields
+                return {"record": {"record_id": record_id, "fields": fields}}
+
+        plan_client = RecordingPlanClient()
+        app.dependency_overrides[main_module.get_settings] = lambda: Settings(
+            feishu_app_id="cli_test",
+            feishu_app_secret="secret",
+            feishu_base_token="base",
+            plan_writeback_enabled=True,
+        )
+        try:
+            with (
+                patch.object(main_module, "_feishu", return_value=plan_client),
+                patch.object(main_module, "_write_log", new_callable=AsyncMock),
+            ):
+                client = TestClient(app)
+                resp = client.post(
+                    "/plan/reselect",
+                    json={
+                        "candidate_record_id": "rec_weekly",
+                        "candidate": {
+                            "record_id": "rec_weekly",
+                            "fields": {
+                                "候选标题": "weekly candidate",
+                                "产品名": "FUNLAB hero product",
+                                "品牌": "FUNLAB",
+                                "平台": "Facebook",
+                                "发布位置": "FB Page",
+                                "计划日期": "1784073600000",
+                                "内容支柱": "UGC",
+                                "目标信号": "Comments",
+                                "实验变量": "CTA",
+                            },
+                        },
+                        "action": "confirm_generate",
+                        "write_back": True,
+                    },
+                )
+        finally:
+            app.dependency_overrides.clear()
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(plan_client.weekly_update_fields["内容日历record_id"], "rec_content")
+        self.assertEqual(plan_client.weekly_update_fields["日确认状态"], "已生成内容日历")
+        self.assertNotIn("日确认动作", plan_client.weekly_update_fields)
+        self.assertNotIn("日确认时间", plan_client.weekly_update_fields)
+
     def test_resolve_product_pool_matches_sku_and_brand_model(self):
         by_sku = resolve_product_pool("FLPR008B", [product()], "FUNLAB")
         self.assertEqual(by_sku["matched"][0]["ERP SKU"], "FLPR008B")

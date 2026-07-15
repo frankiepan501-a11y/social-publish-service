@@ -98,6 +98,34 @@ def _feishu_writeback_detail(exc: FeishuError) -> dict[str, str]:
     }
 
 
+WEEKLY_POOL_UPDATE_FIELDS = {
+    "候选标题",
+    "内容支柱",
+    "实验变量",
+    "SEO主关键词",
+    "GEO目标问题",
+    "搜索意图",
+    "语义实体词",
+    "长尾关键词",
+    "Hashtag词组池",
+    "SEO/GEO生成说明",
+    "目标落地页",
+    "参考对象",
+    "参考对象链接",
+    "参考理由",
+    "借鉴元素",
+    "禁止复制元素",
+    "重推次数",
+    "日确认状态",
+    "运行/回放ID",
+    "内容日历record_id",
+}
+
+
+def _weekly_pool_update_fields(updates: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in updates.items() if key in WEEKLY_POOL_UPDATE_FIELDS}
+
+
 def _parse_now(raw: str | None) -> datetime:
     if not raw:
         return datetime.now(timezone.utc)
@@ -1152,7 +1180,11 @@ async def _execute_plan_reselect(req: PlanReselectRequest, settings: Settings) -
                 updates["内容日历record_id"] = new_record_id
                 updates["日确认状态"] = "已生成内容日历"
             if candidate_id != "inline-weekly-candidate":
-                weekly_update = await client.update_record(settings.weekly_pool_table_id, candidate_id, updates)
+                weekly_update = await client.update_record(
+                    settings.weekly_pool_table_id,
+                    candidate_id,
+                    _weekly_pool_update_fields(updates),
+                )
         except FeishuError as exc:
             detail = _feishu_writeback_detail(exc)
             await _write_log(
