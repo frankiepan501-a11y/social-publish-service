@@ -288,7 +288,9 @@ def build_weekly_candidates(
             continue
         brand = select_value(fields.get("品牌")) or ("FUNLAB" if "funlab" in account.lower() else "Powkong")
         platform = select_value(fields.get("平台")) or ("Facebook" if "fb" in account.lower() else "Instagram")
-        products = _split_pool(fields.get("产品池")) or [f"{brand} hero product"]
+        products = _split_pool(fields.get("产品池"))
+        if not products:
+            continue
         count = _weekly_count(fields)
         for i in range(count):
             product = products[i % len(products)]

@@ -107,6 +107,15 @@ class PlanningTest(unittest.TestCase):
         self.assertIn("#FUNLAB", first["Hashtag词组池"])
         self.assertEqual(first["日确认状态"], "待日审")
 
+    def test_build_weekly_candidates_skips_missing_product_pool(self):
+        candidates = build_weekly_candidates(
+            [strategy(**{"产品池": ""})],
+            [reference()],
+            week_start="2026-07-06",
+            limit=10,
+        )
+        self.assertEqual(candidates, [])
+
     def test_content_calendar_fields_from_candidate(self):
         candidate = build_weekly_candidates([strategy()], [reference()], week_start="2026-07-06", limit=1)[0]
         candidate["record_id"] = "rec_weekly"
@@ -182,8 +191,8 @@ class PlanningTest(unittest.TestCase):
         body = resp.json()
         self.assertTrue(body["ok"])
         self.assertEqual(body["status"], "weekly-plan-dry-run")
-        self.assertEqual(body["generated"], 4)
-        self.assertEqual(body["candidates"][0]["参考对象"], "待补充参考对象")
+        self.assertEqual(body["generated"], 0)
+        self.assertEqual(body["candidates"], [])
 
     def test_plan_writeback_is_gated(self):
         app.dependency_overrides[main_module.get_settings] = lambda: Settings(plan_writeback_enabled=False)

@@ -97,6 +97,12 @@ class GenerationRulesTest(unittest.TestCase):
         ok, reason = generation_candidate_reason(fields(**{"状态": "待发布"}))
         self.assertFalse(ok)
         self.assertEqual(reason, "status=待发布")
+        ok, reason = generation_candidate_reason(fields(**{"产品参考图": []}))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "missing_product_reference_image")
+        ok, reason = generation_candidate_reason(fields(**{"品牌": "FUNLAB"}))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "FUNLAB_IP_COMPLIANCE_MISSING")
 
     def test_validate_generation_payload_accepts_template(self):
         payload = fallback_generation(fields())
@@ -808,6 +814,24 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertTrue(body["scan_run_id"].startswith("gscanv1-"))
         self.assertEqual(body["results"][0]["record_id"], "rec_ok")
         self.assertEqual(body["skipped_sample"][0]["record_id"], "rec_skip")
+
+    def test_generate_scan_skips_missing_product_reference(self):
+        client = TestClient(app)
+        resp = client.post(
+            "/generate/scan",
+            json={
+                "records": [{"record_id": "rec_missing_ref", "fields": fields(**{"产品参考图": []})}],
+                "write_back": False,
+                "limit": 10,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["selected"], 0)
+        self.assertEqual(body["generated"], 0)
+        self.assertEqual(body["failed"], 0)
+        self.assertEqual(body["skipped_sample"][0]["reason"], "missing_product_reference_image")
 
     def test_generate_scan_failed_result_includes_record_id(self):
         client = TestClient(app)

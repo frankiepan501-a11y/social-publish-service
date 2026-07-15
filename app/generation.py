@@ -266,6 +266,11 @@ def generation_candidate_reason(fields: dict[str, Any], *, force: bool = False) 
     missing = required_generation_missing(fields)
     if missing:
         return False, "missing=" + ",".join(missing)
+    if image_generation_requires_reference(fields) and not has_product_reference_image(fields):
+        return False, "missing_product_reference_image"
+    ip_issue = funlab_ip_compliance_issue(fields)
+    if ip_issue:
+        return False, ip_issue
     current_hash = generation_input_hash(fields)
     existing_hash = text_value(fields.get("AI生成输入Hash"))
     gen_status = select_value(fields.get("AI生成状态"))
