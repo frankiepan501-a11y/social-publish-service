@@ -108,6 +108,10 @@ Operational fixes:
   - Related n8n fix: workflow `YjTXaoWAcy89xZpT` node `FBIG Daily Confirm Reply` now stringifies object errors so failure cards no longer show `[object Object]`.
   - Verification: full local `unittest discover -s tests` passed 93 tests; Zeabur deployment from commit `7fdbb6b52ae0c7dc552991b713fc1c27a796782b` reached `RUNNING`; production `/plan/reselect` dry-run returned `UGC/KOL社证`; production writeback smoke created content-calendar record `recvpqo3NoSsxh` with datetime and number fields normalized, then the test record was deleted.
   - Repair result: the three failed operator clicks were replayed after the fix. Weekly candidates `recvpekE9WTW10`, `recvpekFAUhUgq`, and `recvpekGWmMeCM` now have `日确认状态=已生成内容日历` and content-calendar records `recvpqrjw9m6vm`, `recvpqrmcpCqNy`, and `recvpqronWbHBx`.
+- 2026-07-15 FB/IG generation scan readiness gate:
+  - Problem: after the daily-confirm repair, `/generate/scan` alerted with `GENERATION_OUTPUT_INVALID` for the three replayed records because they used placeholder products (`FUNLAB hero product` / `Powkong hero product`) and lacked product reference images; FUNLAB records also lacked IP compliance status.
+  - Fix: weekly planning no longer fabricates `{brand} hero product` candidates when product pools are empty, and `generate/scan` skips records missing required product reference images or FUNLAB IP compliance instead of selecting them and reporting a generation failure.
+  - Verification: full local `unittest discover -s tests` passed 95 tests; Zeabur deployment from commit `cb001753c678307ea98e606f6ae480a171a92fb9` reached `RUNNING`; production replay `POST /generate/scan {"write_back":false,"source":"replay","force":false,"limit":3}` returned `ok=true`, `selected=0`, `failed=0`, with the three replayed records skipped as `missing_product_reference_image`.
 
 Required environment for production:
 - `SOCIAL_PUBLISH_API_TOKEN`
