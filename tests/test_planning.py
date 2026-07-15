@@ -116,6 +116,43 @@ class PlanningTest(unittest.TestCase):
         )
         self.assertEqual(candidates, [])
 
+    def test_build_weekly_candidates_skips_hero_product_pool(self):
+        candidates = build_weekly_candidates(
+            [strategy(**{"产品池": "FUNLAB hero product"})],
+            [reference()],
+            week_start="2026-07-06",
+            limit=10,
+        )
+        self.assertEqual(candidates, [])
+
+    def test_build_weekly_candidates_operator_strategy_overrides_default_strategy(self):
+        default_strategy = strategy(
+            **{
+                "record_id": "rec_default",
+                "提交状态": "默认锁定",
+                "策略来源": "default",
+                "周次": "2026-07-06",
+                "产品池": "FUNLAB hero product",
+            }
+        )
+        operator_strategy = strategy(
+            **{
+                "record_id": "rec_operator",
+                "提交状态": "运营已提交",
+                "策略来源": "operator",
+                "周次": "2026-07-06",
+                "产品池": "FUNLAB FF01A-04 Controller",
+            }
+        )
+        candidates = build_weekly_candidates(
+            [default_strategy, operator_strategy],
+            [reference()],
+            week_start="2026-07-06",
+            limit=10,
+        )
+        self.assertEqual(len(candidates), 2)
+        self.assertTrue(all(candidate["产品名"] == "FUNLAB FF01A-04 Controller" for candidate in candidates))
+
     def test_content_calendar_fields_from_candidate(self):
         candidate = build_weekly_candidates([strategy()], [reference()], week_start="2026-07-06", limit=1)[0]
         candidate["record_id"] = "rec_weekly"

@@ -217,6 +217,18 @@ def _strategy_values(fields: dict[str, Any], idx: int, product: str, brand: str)
     }
 
 
+def _strategy_week(fields: dict[str, Any], week_label: str) -> str:
+    return text_value(fields.get("周次") or fields.get("策略周次")) or week_label
+
+
+def _is_operator_strategy(fields: dict[str, Any]) -> bool:
+    return select_value(fields.get("提交状态")) == "运营已提交" or select_value(fields.get("策略来源")) == "operator"
+
+
+def _is_default_strategy(fields: dict[str, Any]) -> bool:
+    return select_value(fields.get("提交状态")) == "默认锁定" or select_value(fields.get("策略来源")) == "default"
+
+
 def _reference_matches(ref_fields: dict[str, Any], brand: str, platform: str, pillar: str, product: str) -> bool:
     status = select_value(ref_fields.get("状态"))
     if status and status != "可用":
@@ -276,19 +288,26 @@ def build_weekly_candidates(
     start = _week_start(week_start, now)
     week_label = start.isoformat()
     candidates: list[dict[str, Any]] = []
+    operator_strategy_keys = {
+        (_strategy_week(_fields(strategy), week_label), text_value(_fields(strategy).get("账号名称") or _fields(strategy).get("账号")))
+        for strategy in strategies
+        if _is_operator_strategy(_fields(strategy))
+    }
     for s_idx, strategy in enumerate(strategies):
         fields = _fields(strategy)
         if select_value(fields.get("状态")) == "暂停":
             continue
-        strategy_week = text_value(fields.get("周次") or fields.get("策略周次"))
+        strategy_week = _strategy_week(fields, week_label)
         if strategy_week and strategy_week != week_label:
             continue
         account = text_value(fields.get("账号名称") or fields.get("账号"))
         if not account:
             continue
+        if _is_default_strategy(fields) and (strategy_week, account) in operator_strategy_keys:
+            continue
         brand = select_value(fields.get("品牌")) or ("FUNLAB" if "funlab" in account.lower() else "Powkong")
         platform = select_value(fields.get("平台")) or ("Facebook" if "fb" in account.lower() else "Instagram")
-        products = _split_pool(fields.get("产品池"))
+        products = [product for product in _split_pool(fields.get("产品池")) if "hero product" not in product.lower()]
         if not products:
             continue
         count = _weekly_count(fields)

@@ -121,6 +121,11 @@ Operational fixes:
   - Root cause: content `图片生成状态=失败` was not treated as a terminal image state, and worker-table `状态=失败` was surfaced as a scan failure instead of being mapped back to the content row as an image-generation failure.
   - Fix: image-task creation now skips terminal failed image rows unless forced; image-result ingest scan skips content rows already marked `图片生成状态=失败`; worker `状态=失败/处理失败/failed/error` maps to content `图片生成状态=失败` plus `图片生成错误`.
   - Verification: local targeted tests for terminal failed image status, failed content skip, and worker failure mapping passed; full local `unittest discover -s tests` passed 101 tests with service-token env cleared for local auth.
+- 2026-07-15 FB/IG weekly strategy default/placeholder isolation:
+  - Problem: daily confirmation could still surface `FUNLAB hero product` / `Powkong hero product` candidates from old default-locked strategies, so card batches could appear incomplete or misordered relative to the four live accounts.
+  - Root cause: `build_weekly_candidates` processed enabled default strategies before operator-submitted strategies for the same account/week, and did not filter legacy `hero product` placeholder pools.
+  - Fix: weekly planning now skips a default strategy when an operator-submitted strategy exists for the same account/week, and filters `hero product` entries from product pools.
+  - Verification: local targeted tests for hero-product filtering and operator-over-default strategy precedence passed; full local `unittest discover -s tests` passed 103 tests with service-token env cleared for local auth.
 
 Required environment for production:
 - `SOCIAL_PUBLISH_API_TOKEN`
