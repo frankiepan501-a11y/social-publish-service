@@ -19,13 +19,23 @@ class Settings:
     image_task_write_enabled: bool = env_bool("SOCIAL_IMAGE_TASK_WRITE_ENABLED", False)
     image_result_writeback_enabled: bool = env_bool("SOCIAL_IMAGE_RESULT_WRITEBACK_ENABLED", False)
     asset_prepare_enabled: bool = env_bool("SOCIAL_ASSET_PREPARE_ENABLED", False)
+    approval_writeback_enabled: bool = env_bool("SOCIAL_APPROVAL_WRITEBACK_ENABLED", False)
+    plan_writeback_enabled: bool = env_bool("SOCIAL_PLAN_WRITEBACK_ENABLED", False)
     dry_run_write_logs: bool = env_bool("SOCIAL_PUBLISH_DRY_RUN_WRITE_LOGS", True)
 
     feishu_app_id: str = os.getenv("FEISHU_APP_ID", "")
     feishu_app_secret: str = os.getenv("FEISHU_APP_SECRET", "")
+    feishu_bitable_app_id: str = os.getenv("FEISHU_BITABLE_APP_ID", os.getenv("FEISHU_APP_ID", ""))
+    feishu_bitable_app_secret: str = os.getenv("FEISHU_BITABLE_APP_SECRET", os.getenv("FEISHU_APP_SECRET", ""))
     feishu_base_token: str = os.getenv("FEISHU_BASE_TOKEN", "JXw5bUmRoaaCPqsbc6HctWfknhe")
     content_table_id: str = os.getenv("FEISHU_CONTENT_TABLE_ID", "tblhVnKqqhTXvO3Y")
     account_table_id: str = os.getenv("FEISHU_ACCOUNT_TABLE_ID", "tbliJB7jJmXVTaXf")
+    strategy_table_id: str = os.getenv("FEISHU_STRATEGY_TABLE_ID", "tblyavkR6xdEt9gd")
+    reference_table_id: str = os.getenv("FEISHU_REFERENCE_TABLE_ID", "tblMDwMv07jbeGAE")
+    weekly_pool_table_id: str = os.getenv("FEISHU_WEEKLY_POOL_TABLE_ID", "tblV8rGXyRWGsE5r")
+    product_index_table_id: str = os.getenv("FEISHU_PRODUCT_INDEX_TABLE_ID", "tblfI565xItYpXhE")
+    kol_candidate_table_id: str = os.getenv("FEISHU_KOL_CANDIDATE_TABLE_ID", "tblAIDN2cMSQVgGR")
+    weekly_review_table_id: str = os.getenv("FEISHU_WEEKLY_REVIEW_TABLE_ID", "tblyJyHRa4Egm4ft")
     log_table_id: str = os.getenv("FEISHU_LOG_TABLE_ID", "tblgpuSW1cFKg2t7")
     metrics_table_id: str = os.getenv("FEISHU_METRICS_TABLE_ID", "tbl6LPXQlpXg9KXG")
     image_task_base_token: str = os.getenv("FEISHU_IMAGE_TASK_BASE_TOKEN", "Y0mdb6727arI58sLBsIcI7i3ncc")
@@ -41,7 +51,10 @@ class Settings:
     generation_ai_timeout_seconds: float = float(os.getenv("GENERATION_AI_TIMEOUT_SECONDS", "45"))
 
     def feishu_enabled(self) -> bool:
-        return bool(self.feishu_app_id and self.feishu_app_secret and self.feishu_base_token)
+        return bool(
+            (self.feishu_bitable_app_id and self.feishu_bitable_app_secret or self.feishu_app_id and self.feishu_app_secret)
+            and self.feishu_base_token
+        )
 
     def meta_enabled(self) -> bool:
         return bool(self.meta_access_token)

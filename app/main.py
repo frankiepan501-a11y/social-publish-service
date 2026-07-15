@@ -5,13 +5,33 @@ import hashlib
 import json
 import secrets
 import uuid
+from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 
+from .approval import approval_card_preview, approval_update_fields
 from .config import Settings, get_settings
+from .discovery import (
+    DEFAULT_ACCOUNT_SLOTS,
+    apply_kol_action,
+    build_kol_feishu_cards,
+    build_kol_candidates,
+    build_kol_review_cards,
+    build_kol_visual_post_candidates,
+    build_product_index_fields,
+    build_reference_discovery_candidates,
+    build_weekly_input_feishu_card,
+    build_weekly_input_card,
+    discovery_input_hash,
+    lock_weekly_strategies,
+    normalize_account_records,
+)
 from .feishu_client import FeishuClient, FeishuError
 from .generation import (
+    DEFAULT_REFERENCE_STRATEGY,
     build_update_fields,
+    design_reference_images,
+    detail_reference_images,
     generate_payload,
     generation_candidate_reason,
     generation_input_hash,
@@ -23,9 +43,28 @@ from .generation import (
     validate_generation_payload,
 )
 from .meta_client import MetaApiError, MetaClient
+from .models import ApprovalActionRequest, ApprovalCardPreviewRequest
 from .models import GenerateBriefRequest, GenerateScanRequest, InsightsPollRequest, PublishRequest, PublishScanRequest, ReplayRequest
+from .models import PlanDailyConfirmRequest, PlanReselectRequest, PlanWeeklyRequest
+from .models import (
+    KolActionRequest,
+    KolVisualPostDiscoveryRequest,
+    KolWeeklyDiscoveryRequest,
+    ProductIndexSyncRequest,
+    ReferenceWeeklyDiscoveryRequest,
+    WeeklyInputActionRequest,
+    WeeklyInputCardRequest,
+)
 from .models import ImageResultIngestRequest, ImageTaskRequest, ImageTaskScanRequest
 from .models import ImageResultIngestScanRequest
+from .planning import (
+    build_daily_confirm_card,
+    build_daily_confirm_feishu_card,
+    build_weekly_candidates,
+    default_strategies_from_accounts,
+    apply_plan_action,
+    select_daily_candidates,
+)
 from .rules import (
     AccountConfig,
     MODE_AUTO,
@@ -52,6 +91,13 @@ def _check_auth(settings: Settings, authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
+def _feishu_writeback_detail(exc: FeishuError) -> dict[str, str]:
+    return {
+        "code": "FEISHU_WRITEBACK_FAILED",
+        "message": str(exc),
+    }
+
+
 def _parse_now(raw: str | None) -> datetime:
     if not raw:
         return datetime.now(timezone.utc)
@@ -72,7 +118,9 @@ def _safe_issues(result):
 def _feishu(settings: Settings) -> FeishuClient | None:
     if not settings.feishu_enabled():
         return None
-    return FeishuClient(settings.feishu_app_id, settings.feishu_app_secret, settings.feishu_base_token)
+    app_id = settings.feishu_bitable_app_id or settings.feishu_app_id
+    app_secret = settings.feishu_bitable_app_secret or settings.feishu_app_secret
+    return FeishuClient(app_id, app_secret, settings.feishu_base_token)
 
 
 def _feishu_image(settings: Settings) -> FeishuClient | None:
@@ -95,6 +143,58 @@ def _norm_match(value: str) -> str:
     return text_value(value).lower().replace(" ", "").replace("-", "")
 
 
+def _ref_name(ref: dict) -> str:
+    return text_value(ref.get("name")) or text_value(ref.get("file_name")) or text_value(ref.get("url"))
+
+
+def _pick_refs(refs: list[dict], *, max_count: int, prefer: tuple[str, ...] = (), avoid: tuple[str, ...] = ()) -> list[dict]:
+    if not refs or max_count <= 0:
+        return []
+
+    def score(ref: dict) -> tuple[int, int]:
+        name = _ref_name(ref).lower()
+        preferred = sum(1 for marker in prefer if marker.lower() in name)
+        avoided = sum(1 for marker in avoid if marker.lower() in name)
+        return preferred - avoided, -refs.index(ref)
+
+    ranked = sorted(refs, key=score, reverse=True)
+    selected: list[dict] = []
+    seen_tokens: set[str] = set()
+    for ref in ranked:
+        token = text_value(ref.get("file_token")) or _ref_name(ref)
+        if token in seen_tokens:
+            continue
+        selected.append(ref)
+        seen_tokens.add(token)
+        if len(selected) >= max_count:
+            break
+    return selected
+
+
+def _select_image_task_references(
+    product_refs: list[dict],
+    design_refs: list[dict],
+    detail_refs: list[dict],
+) -> tuple[list[dict], list[dict], list[dict]]:
+    selected_design = _pick_refs(
+        design_refs,
+        max_count=1,
+        prefer=("设计", "竞品", "社媒", "scene", "design", "reference"),
+    )
+    selected_detail = _pick_refs(
+        detail_refs,
+        max_count=1,
+        prefer=("细节", "特写", "按键", "图标", "中间", "detail", "button", "close"),
+    )
+    selected_product = _pick_refs(
+        product_refs,
+        max_count=1,
+        prefer=("正面主图", "主图", "正面", "front", "main", "image-02", "图2", "02"),
+        avoid=("细节", "特写", "按键", "图标", "接口", "顶部", "背面", "45", "斜", "detail", "button", "port", "top", "back"),
+    )
+    return selected_product, selected_design, selected_detail
+
+
 def _merge_product_context_fields(fields: dict, product_record: dict | None) -> dict:
     if not product_record:
         return fields
@@ -106,6 +206,7 @@ def _merge_product_context_fields(fields: dict, product_record: dict | None) -> 
 
     image_value = product_fields.get("图片")
     if image_value and not has_product_reference_image(merged):
+        merged["产品参考图包"] = image_value
         merged["产品参考图"] = image_value
         merged["产品库图片"] = image_value
 
@@ -134,7 +235,11 @@ def _merge_product_context_fields(fields: dict, product_record: dict | None) -> 
             or text_value(product_fields.get("型号英文名"))
         )
     if not text_value(merged.get("品牌型号/SKU")):
-        merged["品牌型号/SKU"] = text_value(product_fields.get("品牌型号")) or text_value(product_fields.get("ERP SKU"))
+        merged["品牌型号/SKU"] = (
+            text_value(product_fields.get("品牌型号V2"))
+            or text_value(product_fields.get("品牌型号"))
+            or text_value(product_fields.get("ERP SKU"))
+        )
     if not text_value(merged.get("主推卖点")) and product_fields.get("产品简述"):
         merged["主推卖点"] = product_fields.get("产品简述")
     return merged
@@ -158,6 +263,7 @@ async def _load_product_record_for_content(fields: dict, settings: Settings) -> 
     for record in await client.list_records(table_id, page_size=200):
         product_fields = normalize_fields(record)
         candidates = [
+            text_value(product_fields.get("品牌型号V2")),
             text_value(product_fields.get("品牌型号")),
             text_value(product_fields.get("ERP SKU")),
             text_value(product_fields.get("报价单型号")),
@@ -228,6 +334,17 @@ async def _load_image_result_source(req: ImageResultIngestRequest, settings: Set
     return req.record_id, await client.get_record(settings.content_table_id, req.record_id)
 
 
+async def _load_approval_record(req: ApprovalActionRequest | ApprovalCardPreviewRequest, settings: Settings) -> tuple[str, dict]:
+    if req.record:
+        return req.record_id or req.record.get("record_id", "inline"), req.record
+    if not req.record_id:
+        raise HTTPException(status_code=400, detail="record_id or record is required")
+    client = _feishu(settings)
+    if client is None:
+        raise HTTPException(status_code=503, detail="Feishu env is not configured")
+    return req.record_id, await client.get_record(settings.content_table_id, req.record_id)
+
+
 async def _load_image_task_record(req: ImageResultIngestRequest, settings: Settings, content_fields: dict) -> tuple[str, dict]:
     if req.image_task_record:
         return req.image_task_record_id or req.image_task_record.get("record_id", "inline-image-task"), req.image_task_record
@@ -278,6 +395,804 @@ async def _write_log(settings: Settings, **kwargs) -> None:
         return
 
 
+async def _load_plan_records(req: PlanWeeklyRequest, settings: Settings) -> tuple[list[dict], list[dict], list[dict]]:
+    if req.strategies or req.references or req.reviews:
+        return req.strategies, req.references, req.reviews
+    client = _feishu(settings)
+    if client is None:
+        return [], [], []
+
+    async def list_or_empty(table_id: str) -> list[dict]:
+        if not table_id:
+            return []
+        try:
+            return await client.list_records(table_id, page_size=200)
+        except Exception:
+            return []
+
+    strategies = await list_or_empty(settings.strategy_table_id)
+    references = await list_or_empty(settings.reference_table_id)
+    reviews = await list_or_empty(settings.weekly_review_table_id)
+    if not strategies:
+        accounts = await list_or_empty(settings.account_table_id)
+        if not accounts:
+            accounts = [{"fields": fields} for fields in DEFAULT_ACCOUNT_SLOTS]
+        strategies = [{"fields": fields} for fields in default_strategies_from_accounts(accounts)]
+    return strategies, references, reviews
+
+
+async def _load_plan_candidates(req: PlanDailyConfirmRequest, settings: Settings) -> list[dict]:
+    if req.candidates:
+        return req.candidates
+    client = _feishu(settings)
+    if client is None:
+        return []
+    try:
+        return await client.list_records(settings.weekly_pool_table_id, page_size=200)
+    except Exception:
+        return []
+
+
+async def _load_plan_candidate(req: PlanReselectRequest, settings: Settings) -> tuple[str, dict]:
+    if req.candidate:
+        return req.candidate_record_id or req.candidate.get("record_id", "inline-weekly-candidate"), req.candidate
+    if not req.candidate_record_id:
+        raise HTTPException(status_code=400, detail="candidate_record_id or candidate is required")
+    client = _feishu(settings)
+    if client is None:
+        raise HTTPException(status_code=503, detail="Feishu env is not configured")
+    return req.candidate_record_id, await client.get_record(settings.weekly_pool_table_id, req.candidate_record_id)
+
+
+async def _load_reference_records(req_references: list[dict[str, Any]], settings: Settings) -> list[dict]:
+    if req_references:
+        return req_references
+    client = _feishu(settings)
+    if client is None:
+        return []
+    try:
+        return await client.list_records(settings.reference_table_id, page_size=200)
+    except Exception:
+        return []
+
+
+async def _load_account_records(req_accounts: list[dict[str, Any]], settings: Settings) -> list[dict]:
+    if req_accounts:
+        return req_accounts
+    client = _feishu(settings)
+    if client is None:
+        return []
+    try:
+        return await client.list_records(settings.account_table_id, page_size=200)
+    except Exception:
+        return [{"fields": item} for item in DEFAULT_ACCOUNT_SLOTS]
+
+
+async def _load_product_index_records(req_product_index: list[dict[str, Any]], settings: Settings) -> list[dict]:
+    if req_product_index:
+        return req_product_index
+    client = _feishu(settings)
+    if client is not None and settings.product_index_table_id:
+        try:
+            records = await client.list_records(settings.product_index_table_id, page_size=200)
+            if records:
+                return records
+        except Exception:
+            pass
+    product_client = _feishu_product(settings)
+    if product_client is None:
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        funlab = await product_client.list_records(settings.product_funlab_table_id, page_size=200)
+        rows.extend([{"fields": item} for item in build_product_index_fields(funlab, brand_hint="FUNLAB")])
+    except Exception:
+        pass
+    try:
+        powkong = await product_client.list_records(settings.product_powkong_table_id, page_size=200)
+        rows.extend([{"fields": item} for item in build_product_index_fields(powkong, brand_hint="Powkong")])
+    except Exception:
+        pass
+    return rows
+
+
+async def _load_strategy_records(req_strategies: list[dict[str, Any]], settings: Settings) -> list[dict]:
+    if req_strategies:
+        return req_strategies
+    client = _feishu(settings)
+    if client is None:
+        return []
+    try:
+        strategies = await client.list_records(settings.strategy_table_id, page_size=200)
+    except Exception:
+        strategies = []
+    if strategies:
+        return strategies
+    try:
+        accounts = await client.list_records(settings.account_table_id, page_size=200)
+    except Exception:
+        accounts = [{"fields": item} for item in DEFAULT_ACCOUNT_SLOTS]
+    return [{"fields": fields} for fields in default_strategies_from_accounts(accounts)]
+
+
+async def _load_kol_candidates(req_candidates: list[dict[str, Any]], settings: Settings) -> list[dict]:
+    if req_candidates:
+        return req_candidates
+    client = _feishu(settings)
+    if client is None or not settings.kol_candidate_table_id:
+        return []
+    try:
+        return await client.list_records(settings.kol_candidate_table_id, page_size=200)
+    except Exception:
+        return []
+
+
+async def _load_kol_candidate(req: KolActionRequest, settings: Settings) -> tuple[str, dict]:
+    if req.candidate:
+        return req.candidate_record_id or req.candidate.get("record_id", "inline-kol-candidate"), req.candidate
+    if not req.candidate_record_id:
+        raise HTTPException(status_code=400, detail="candidate_record_id or candidate is required")
+    client = _feishu(settings)
+    if client is None or not settings.kol_candidate_table_id:
+        raise HTTPException(status_code=503, detail="Feishu KOL candidate table is not configured")
+    return req.candidate_record_id, await client.get_record(settings.kol_candidate_table_id, req.candidate_record_id)
+
+
+async def _prepare_kol_image_keys(candidates: list[dict[str, Any]], settings: Settings) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+    client = _feishu(settings)
+    if client is None:
+        return [{"reason": "FEISHU_NOT_CONFIGURED", "candidate": text_value(item.get("账号名称"))} for item in candidates]
+    errors: list[dict[str, Any]] = []
+    for candidate in candidates:
+        name = text_value(candidate.get("账号名称")) or "kol-reference"
+        for index in (1, 2):
+            image_field = f"样例帖子{index}图片"
+            key_field = f"样例帖子{index}图片Key"
+            if text_value(candidate.get(key_field)):
+                continue
+            image_url = text_value(candidate.get(image_field))
+            if not image_url:
+                continue
+            try:
+                candidate[key_field] = await client.upload_message_image_from_url(
+                    image_url,
+                    file_name=f"fbig_kol_{name}_{index}.png",
+                )
+            except Exception as exc:
+                error_field = f"样例帖子{index}图片Key错误"
+                candidate[error_field] = f"{type(exc).__name__}: {str(exc)[:300]}"
+                errors.append(
+                    {
+                        "candidate": name,
+                        "image_field": image_field,
+                        "image_url": image_url,
+                        "reason": candidate[error_field],
+                    }
+                )
+    return errors
+
+
+KOL_CANDIDATE_CARD_ONLY_FIELDS = {
+    "样例帖子1图片Key",
+    "样例帖子2图片Key",
+    "样例帖子1图片Key错误",
+    "样例帖子2图片Key错误",
+}
+
+
+def _kol_candidate_persist_fields(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in candidate.items() if key not in KOL_CANDIDATE_CARD_ONLY_FIELDS}
+
+
+def _kol_review_record_with_card_fields(created_item: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any] | None:
+    record = created_item.get("record") if isinstance(created_item, dict) else None
+    if not isinstance(record, dict):
+        return None
+    record_fields = record.get("fields")
+    if not isinstance(record_fields, dict):
+        return record
+    merged_fields = dict(candidate)
+    merged_fields.update(record_fields)
+    record_id = text_value(record.get("record_id") or record.get("id"))
+    if record_id:
+        merged_fields["record_id"] = record_id
+    for field_name in KOL_CANDIDATE_CARD_ONLY_FIELDS:
+        if candidate.get(field_name):
+            merged_fields[field_name] = candidate[field_name]
+    return {**record, "fields": merged_fields}
+
+
+def _plan_gate_blocked(settings: Settings, run_id: str, node: str, record_id: str) -> dict | None:
+    if settings.plan_writeback_enabled:
+        return None
+    return {"ok": False, "status": "blocked", "run_id": run_id, "blocking": [{"code": "PLAN_WRITEBACK_DISABLED", "node": node, "record_id": record_id}]}
+
+
+async def _execute_weekly_input_card(req: WeeklyInputCardRequest, settings: Settings) -> dict:
+    run_id = "weeklyinputcardv1-" + uuid.uuid4().hex[:16]
+    accounts = await _load_account_records(req.accounts, settings)
+    product_index = await _load_product_index_records(req.product_index, settings)
+    card = build_weekly_input_card(accounts, product_index, week_start=req.week_start, now=req.now)
+    feishu_card = build_weekly_input_feishu_card(card)
+    await _write_log(
+        settings,
+        run_id=run_id,
+        record_id="weekly-input-card",
+        node="plan_weekly_input_card",
+        status="success",
+        input_hash=discovery_input_hash({"week_start": req.week_start, "accounts": len(accounts), "products": len(product_index)}),
+        output_summary=f"accounts={len(card['accounts'])}, products={len(product_index)}",
+        decision_reason="weekly_input_card_built",
+        mode="dry-run",
+    )
+    return {"ok": True, "status": "weekly-input-card", "run_id": run_id, "card": card, "feishu_card": feishu_card}
+
+
+async def _execute_weekly_input_action(req: WeeklyInputActionRequest, settings: Settings) -> dict:
+    run_id = "weeklyinputv1-" + uuid.uuid4().hex[:16]
+    if req.write_back:
+        blocked = _plan_gate_blocked(settings, run_id, "plan_weekly_input_action", "strategy")
+        if blocked:
+            await _write_log(
+                settings,
+                run_id=run_id,
+                record_id="strategy",
+                node="plan_weekly_input_action",
+                status="blocked",
+                input_hash="",
+                output_summary="weekly input writeback disabled",
+                decision_reason="PLAN_WRITEBACK_DISABLED",
+                mode="dry-run",
+            )
+            return blocked
+    accounts = await _load_account_records(req.accounts, settings)
+    product_index = await _load_product_index_records(req.product_index, settings)
+    strategies = lock_weekly_strategies(accounts, req.submissions, product_index, week_start=req.week_start, now=req.now)
+    created: list[dict] = []
+    if req.write_back:
+        client = _feishu(settings)
+        if client is None:
+            raise HTTPException(status_code=503, detail="Feishu env is not configured")
+        for strategy in strategies:
+            created.append(await client.create_record(settings.strategy_table_id, strategy))
+    await _write_log(
+        settings,
+        run_id=run_id,
+        record_id="strategy",
+        node="plan_weekly_input_action",
+        status="success",
+        input_hash=discovery_input_hash({"week_start": req.week_start, "submissions": req.submissions}),
+        output_summary=f"strategies={len(strategies)}, created={len(created)}",
+        decision_reason="weekly_strategy_locked",
+        mode="commit" if req.write_back else "dry-run",
+    )
+    return {
+        "ok": True,
+        "status": "weekly-input-written" if req.write_back else "weekly-input-dry-run",
+        "run_id": run_id,
+        "strategies": strategies,
+        "created": created,
+    }
+
+
+async def _execute_product_index_sync(req: ProductIndexSyncRequest, settings: Settings) -> dict:
+    run_id = "productindexv1-" + uuid.uuid4().hex[:16]
+    if req.write_back:
+        blocked = _plan_gate_blocked(settings, run_id, "plan_product_index_sync", "product-index")
+        if blocked:
+            return blocked
+        if not settings.product_index_table_id:
+            raise HTTPException(status_code=503, detail="Feishu product index table is not configured")
+    product_records = req.product_records
+    if not product_records:
+        product_client = _feishu_product(settings)
+        if product_client is None:
+            product_records = []
+        elif req.brand.upper() == "FUNLAB":
+            product_records = await product_client.list_records(settings.product_funlab_table_id, page_size=200)
+        elif req.brand.upper() == "POWKONG":
+            product_records = await product_client.list_records(settings.product_powkong_table_id, page_size=200)
+        else:
+            funlab = await product_client.list_records(settings.product_funlab_table_id, page_size=200)
+            powkong = await product_client.list_records(settings.product_powkong_table_id, page_size=200)
+            rows = build_product_index_fields(funlab, brand_hint="FUNLAB") + build_product_index_fields(powkong, brand_hint="Powkong")
+            product_records = [{"fields": item} for item in rows]
+    rows = build_product_index_fields(product_records, brand_hint="" if req.brand == "all" else req.brand)[: req.limit]
+    created: list[dict] = []
+    if req.write_back:
+        client = _feishu(settings)
+        if client is None:
+            raise HTTPException(status_code=503, detail="Feishu env is not configured")
+        for row in rows:
+            created.append(await client.create_record(settings.product_index_table_id, row))
+    await _write_log(
+        settings,
+        run_id=run_id,
+        record_id="product-index",
+        node="plan_product_index_sync",
+        status="success",
+        input_hash=discovery_input_hash({"brand": req.brand, "records": len(product_records)}),
+        output_summary=f"rows={len(rows)}, created={len(created)}",
+        decision_reason="product_index_built",
+        mode="commit" if req.write_back else "dry-run",
+    )
+    return {"ok": True, "status": "product-index-written" if req.write_back else "product-index-dry-run", "run_id": run_id, "rows": rows, "created": created}
+
+
+async def _execute_reference_weekly(req: ReferenceWeeklyDiscoveryRequest, settings: Settings) -> dict:
+    run_id = "refdiscoverv1-" + uuid.uuid4().hex[:16]
+    if req.write_back:
+        blocked = _plan_gate_blocked(settings, run_id, "discovery_reference_weekly", "reference")
+        if blocked:
+            return blocked
+    strategies = await _load_strategy_records(req.strategies, settings)
+    references = await _load_reference_records(req.references, settings)
+    candidates = build_reference_discovery_candidates(
+        strategies,
+        references,
+        week_start=req.week_start,
+        now=req.now,
+        limit_per_brand=req.limit_per_brand,
+    )
+    created: list[dict] = []
+    if req.write_back:
+        client = _feishu(settings)
+        if client is None:
+            raise HTTPException(status_code=503, detail="Feishu env is not configured")
+        for candidate in candidates:
+            created.append(await client.create_record(settings.reference_table_id, candidate))
+    await _write_log(
+        settings,
+        run_id=run_id,
+        record_id="reference",
+        node="discovery_reference_weekly",
+        status="success",
+        input_hash=discovery_input_hash({"week_start": req.week_start, "strategies": len(strategies), "references": len(references)}),
+        output_summary=f"candidates={len(candidates)}, created={len(created)}",
+        decision_reason="reference_discovery_candidates_built",
+        mode="commit" if req.write_back else "dry-run",
+    )
+    return {
+        "ok": True,
+        "status": "reference-discovery-written" if req.write_back else "reference-discovery-dry-run",
+        "run_id": run_id,
+        "candidates": candidates,
+        "created": created,
+        "notes": ["candidates default to 待确认; only 状态=可用 references are eligible for weekly planning"],
+    }
+
+
+async def _execute_kol_weekly(req: KolWeeklyDiscoveryRequest, settings: Settings) -> dict:
+    run_id = "koldiscoverv1-" + uuid.uuid4().hex[:16]
+    if req.write_back:
+        blocked = _plan_gate_blocked(settings, run_id, "discovery_kol_weekly", "kol")
+        if blocked:
+            return blocked
+        if not settings.kol_candidate_table_id:
+            raise HTTPException(status_code=503, detail="Feishu KOL candidate table is not configured")
+    strategies = await _load_strategy_records(req.strategies, settings)
+    existing = await _load_kol_candidates(req.existing_candidates, settings)
+    rejected: list[dict[str, Any]] = []
+    if req.visual_posts:
+        candidates, rejected = build_kol_visual_post_candidates(
+            strategies,
+            req.visual_posts,
+            existing,
+            week_start=req.week_start,
+            now=req.now,
+            per_brand=req.per_brand,
+            min_score=req.min_visual_score,
+        )
+        decision_reason = "kol_visual_post_candidates_built"
+    else:
+        candidates = build_kol_candidates(strategies, existing, week_start=req.week_start, now=req.now, per_brand=req.per_brand)
+        decision_reason = "kol_candidates_built"
+    image_key_errors = []
+    if req.prepare_image_keys:
+        image_key_errors = await _prepare_kol_image_keys(candidates, settings)
+    created: list[dict] = []
+    if req.write_back:
+        client = _feishu(settings)
+        if client is None:
+            raise HTTPException(status_code=503, detail="Feishu env is not configured")
+        for candidate in candidates:
+            try:
+                created.append(await client.create_record(settings.kol_candidate_table_id, _kol_candidate_persist_fields(candidate)))
+            except FeishuError as exc:
+                raise HTTPException(status_code=502, detail=f"Feishu KOL candidate write failed: {exc}") from exc
+    review_records: list[dict[str, Any]] = []
+    if created:
+        for item, candidate in zip(created, candidates):
+            record = _kol_review_record_with_card_fields(item, candidate)
+            if record is not None:
+                review_records.append(record)
+    if not review_records:
+        review_records = [{"fields": item} for item in candidates]
+    cards = build_kol_review_cards(review_records, week_start=req.week_start)
+    feishu_cards = build_kol_feishu_cards(cards)
+    await _write_log(
+        settings,
+        run_id=run_id,
+        record_id="kol",
+        node="discovery_kol_weekly",
+        status="success",
+        input_hash=discovery_input_hash(
+            {
+                "week_start": req.week_start,
+                "strategies": len(strategies),
+                "existing": len(existing),
+                "visual_posts": len(req.visual_posts),
+                "min_visual_score": req.min_visual_score,
+                "prepare_image_keys": req.prepare_image_keys,
+            }
+        ),
+        output_summary=f"candidates={len(candidates)}, rejected={len(rejected)}, cards={len(cards)}, created={len(created)}, image_key_errors={len(image_key_errors)}",
+        decision_reason=decision_reason,
+        mode="commit" if req.write_back else "dry-run",
+    )
+    return {
+        "ok": True,
+        "status": "kol-discovery-written" if req.write_back else "kol-discovery-dry-run",
+        "run_id": run_id,
+        "candidates": candidates,
+        "rejected": rejected,
+        "cards": cards,
+        "feishu_cards": feishu_cards,
+        "created": created,
+        "image_key_errors": image_key_errors,
+        "notes": [
+            "KOL candidates are gated by IG/FB image-post sample links; account homepages, YouTube links, Reels/video pages, and generic websites are excluded.",
+            "When visual_posts are provided, this weekly endpoint uses the same visual-post scoring path as /discovery/kol/visual-posts so n8n or a discovery agent can repush cards through the existing weekly KOL branch.",
+            "If candidates=0, do not send a KOL review card; run visual-reference discovery or ask operations to add verified IG/FB image post URLs.",
+        ],
+    }
+
+
+async def _execute_kol_visual_posts(req: KolVisualPostDiscoveryRequest, settings: Settings) -> dict:
+    run_id = "kolvisualpostv1-" + uuid.uuid4().hex[:16]
+    if req.write_back:
+        blocked = _plan_gate_blocked(settings, run_id, "discovery_kol_visual_posts", "kol")
+        if blocked:
+            return blocked
+        if not settings.kol_candidate_table_id:
+            raise HTTPException(status_code=503, detail="Feishu KOL candidate table is not configured")
+    strategies = await _load_strategy_records(req.strategies, settings)
+    existing = await _load_kol_candidates(req.existing_candidates, settings)
+    candidates, rejected = build_kol_visual_post_candidates(
+        strategies,
+        req.posts,
+        existing,
+        week_start=req.week_start,
+        now=req.now,
+        per_brand=req.per_brand,
+        min_score=req.min_score,
+    )
+    image_key_errors = []
+    if req.prepare_image_keys:
+        image_key_errors = await _prepare_kol_image_keys(candidates, settings)
+    created: list[dict] = []
+    if req.write_back:
+        client = _feishu(settings)
+        if client is None:
+            raise HTTPException(status_code=503, detail="Feishu env is not configured")
+        for candidate in candidates:
+            try:
+                created.append(await client.create_record(settings.kol_candidate_table_id, _kol_candidate_persist_fields(candidate)))
+            except FeishuError as exc:
+                raise HTTPException(status_code=502, detail=f"Feishu KOL candidate write failed: {exc}") from exc
+    review_records: list[dict[str, Any]] = []
+    if created:
+        for item, candidate in zip(created, candidates):
+            record = _kol_review_record_with_card_fields(item, candidate)
+            if record is not None:
+                review_records.append(record)
+    if not review_records:
+        review_records = [{"fields": item} for item in candidates]
+    cards = build_kol_review_cards(review_records, week_start=req.week_start)
+    feishu_cards = build_kol_feishu_cards(cards)
+    await _write_log(
+        settings,
+        run_id=run_id,
+        record_id="kol-visual-posts",
+        node="discovery_kol_visual_posts",
+        status="success",
+        input_hash=discovery_input_hash(
+            {
+                "week_start": req.week_start,
+                "strategies": len(strategies),
+                "posts": len(req.posts),
+                "existing": len(existing),
+                "min_score": req.min_score,
+                "prepare_image_keys": req.prepare_image_keys,
+            }
+        ),
+        output_summary=f"candidates={len(candidates)}, rejected={len(rejected)}, cards={len(cards)}, created={len(created)}, image_key_errors={len(image_key_errors)}",
+        decision_reason="kol_visual_post_candidates_built",
+        mode="commit" if req.write_back else "dry-run",
+    )
+    return {
+        "ok": True,
+        "status": "kol-visual-posts-written" if req.write_back else "kol-visual-posts-dry-run",
+        "run_id": run_id,
+        "candidates": candidates,
+        "rejected": rejected,
+        "cards": cards,
+        "feishu_cards": feishu_cards,
+        "created": created,
+        "image_key_errors": image_key_errors,
+        "notes": [
+            "This endpoint scores already-collected public IG/FB image-post candidates. It does not bypass login walls or scrape private content.",
+            "Ready candidates must include a post-level IG/FB image-post URL and a thumbnail/screenshot URL before operations review.",
+        ],
+    }
+
+
+async def _execute_kol_action(req: KolActionRequest, settings: Settings) -> dict:
+    run_id = "kolactionv1-" + uuid.uuid4().hex[:16]
+    if req.write_back:
+        blocked = _plan_gate_blocked(settings, run_id, "discovery_kol_action", req.candidate_record_id or "kol")
+        if blocked:
+            return blocked
+        if not settings.kol_candidate_table_id:
+            raise HTTPException(status_code=503, detail="Feishu KOL candidate table is not configured")
+    candidate_id, candidate = await _load_kol_candidate(req, settings)
+    strategies = await _load_strategy_records(req.strategies, settings)
+    existing = await _load_kol_candidates(req.existing_candidates, settings)
+    action_result = apply_kol_action(
+        candidate,
+        action=req.action,
+        strategies=strategies,
+        existing_candidates=existing,
+        replacement_count=req.replacement_count,
+        week_start=req.week_start,
+        now=req.now,
+    )
+    candidate_update = None
+    reference_record = None
+    replacement_records: list[dict] = []
+    if req.write_back:
+        client = _feishu(settings)
+        if client is None:
+            raise HTTPException(status_code=503, detail="Feishu env is not configured")
+        if candidate_id != "inline-kol-candidate":
+            candidate_update = await client.update_record(settings.kol_candidate_table_id, candidate_id, action_result["updates"])
+        if action_result.get("reference_fields"):
+            reference_record = await client.create_record(settings.reference_table_id, action_result["reference_fields"])
+        for replacement in action_result.get("replacements", []):
+            replacement_records.append(await client.create_record(settings.kol_candidate_table_id, replacement))
+    await _write_log(
+        settings,
+        run_id=run_id,
+        record_id=candidate_id,
+        node="discovery_kol_action",
+        status="success",
+        input_hash=discovery_input_hash({"candidate_id": candidate_id, "action": req.action}),
+        output_summary=f"action={req.action}, replacements={len(action_result.get('replacements', []))}, reference={bool(action_result.get('reference_fields'))}",
+        decision_reason=req.action,
+        mode="commit" if req.write_back else "dry-run",
+    )
+    return {
+        "ok": True,
+        "status": "kol-action-written" if req.write_back else "kol-action-dry-run",
+        "run_id": run_id,
+        "candidate_record_id": candidate_id,
+        "fields": action_result["updates"],
+        "reference_fields": action_result.get("reference_fields"),
+        "replacements": action_result.get("replacements", []),
+        "candidate_update": candidate_update,
+        "reference_record": reference_record,
+        "replacement_records": replacement_records,
+    }
+
+
+async def _execute_plan_weekly(req: PlanWeeklyRequest, settings: Settings) -> dict:
+    run_id = "planweeklyv1-" + uuid.uuid4().hex[:16]
+    if req.write_back and not settings.plan_writeback_enabled:
+        await _write_log(
+            settings,
+            run_id=run_id,
+            record_id="weekly-pool",
+            node="plan_weekly",
+            status="blocked",
+            input_hash="",
+            output_summary="weekly plan writeback disabled",
+            decision_reason="PLAN_WRITEBACK_DISABLED",
+            mode="dry-run",
+        )
+        return {"ok": False, "status": "blocked", "run_id": run_id, "blocking": [{"code": "PLAN_WRITEBACK_DISABLED"}]}
+
+    strategies, references, reviews = await _load_plan_records(req, settings)
+    candidates = build_weekly_candidates(
+        strategies,
+        references,
+        week_start=req.week_start,
+        now=req.now,
+        limit=req.limit,
+    )
+    created: list[dict] = []
+    if req.write_back:
+        client = _feishu(settings)
+        if client is None:
+            raise HTTPException(status_code=503, detail="Feishu env is not configured")
+        for fields in candidates:
+            to_write = dict(fields)
+            to_write["运行/回放ID"] = run_id
+            created.append(await client.create_record(settings.weekly_pool_table_id, to_write))
+
+    await _write_log(
+        settings,
+        run_id=run_id,
+        record_id="weekly-pool",
+        node="plan_weekly",
+        status="success",
+        input_hash=hashlib.sha256(json.dumps({"week_start": req.week_start, "count": len(strategies)}, ensure_ascii=False).encode()).hexdigest(),
+        output_summary=f"generated={len(candidates)}, created={len(created)}",
+        decision_reason="weekly_plan_generated",
+        mode="commit" if req.write_back else "dry-run",
+    )
+    return {
+        "ok": True,
+        "status": "weekly-plan-written" if req.write_back else "weekly-plan-dry-run",
+        "run_id": run_id,
+        "generated": len(candidates),
+        "created": created,
+        "candidates": candidates,
+        "notes": [
+            "weekly pool only; records are not publishable until daily confirmation creates content calendar rows",
+            "SOCIAL_PLAN_WRITEBACK_ENABLED gates all Base writes for plan endpoints",
+        ],
+    }
+
+
+async def _execute_plan_daily_confirm(req: PlanDailyConfirmRequest, settings: Settings) -> dict:
+    run_id = "plandailyv1-" + uuid.uuid4().hex[:16]
+    if req.write_back and not settings.plan_writeback_enabled:
+        await _write_log(
+            settings,
+            run_id=run_id,
+            record_id="daily-confirm",
+            node="plan_daily_confirm",
+            status="blocked",
+            input_hash="",
+            output_summary="daily confirm writeback disabled",
+            decision_reason="PLAN_WRITEBACK_DISABLED",
+            mode="dry-run",
+        )
+        return {"ok": False, "status": "blocked", "run_id": run_id, "blocking": [{"code": "PLAN_WRITEBACK_DISABLED"}]}
+
+    candidates = await _load_plan_candidates(req, settings)
+    selected = select_daily_candidates(candidates, target_date=req.target_date or req.now, limit=req.limit)
+    cards = [build_daily_confirm_card(candidate) for candidate in selected]
+    feishu_cards = [build_daily_confirm_feishu_card(card, run_id=run_id) for card in cards]
+    updated: list[dict] = []
+    if req.write_back:
+        client = _feishu(settings)
+        if client is None:
+            raise HTTPException(status_code=503, detail="Feishu env is not configured")
+        for candidate in selected:
+            record_id = candidate.get("record_id") or candidate.get("id")
+            if record_id:
+                updated.append(
+                    await client.update_record(
+                        settings.weekly_pool_table_id,
+                        record_id,
+                        {
+                            "日确认状态": "已推送",
+                            "运行/回放ID": run_id,
+                        },
+                    )
+                )
+
+    await _write_log(
+        settings,
+        run_id=run_id,
+        record_id="daily-confirm",
+        node="plan_daily_confirm",
+        status="success",
+        input_hash=hashlib.sha256(json.dumps({"target_date": req.target_date or req.now}, ensure_ascii=False).encode()).hexdigest(),
+        output_summary=f"selected={len(selected)}, cards={len(cards)}, updated={len(updated)}",
+        decision_reason="daily_confirm_cards_built",
+        mode="commit" if req.write_back else "dry-run",
+    )
+    return {
+        "ok": True,
+        "status": "daily-confirm-written" if req.write_back else "daily-confirm-dry-run",
+        "run_id": run_id,
+        "selected": len(selected),
+        "cards": cards,
+        "feishu_cards": feishu_cards,
+        "updated": updated,
+    }
+
+
+async def _execute_plan_reselect(req: PlanReselectRequest, settings: Settings) -> dict:
+    run_id = "planreselectv1-" + uuid.uuid4().hex[:16]
+    if req.write_back and not settings.plan_writeback_enabled:
+        await _write_log(
+            settings,
+            run_id=run_id,
+            record_id=req.candidate_record_id or "inline-weekly-candidate",
+            node="plan_reselect",
+            status="blocked",
+            input_hash="",
+            output_summary="plan action writeback disabled",
+            decision_reason="PLAN_WRITEBACK_DISABLED",
+            mode="dry-run",
+        )
+        return {"ok": False, "status": "blocked", "run_id": run_id, "blocking": [{"code": "PLAN_WRITEBACK_DISABLED"}]}
+
+    candidate_id, candidate = await _load_plan_candidate(req, settings)
+    references = await _load_reference_records(req.references, settings) if req.action == "reselect_reference" else req.references
+    action_result = apply_plan_action(
+        candidate,
+        action=req.action,
+        references=references,
+        reschedule_date=req.reschedule_date,
+    )
+    updates = dict(action_result["updates"])
+    updates["运行/回放ID"] = run_id
+    content_fields = action_result.get("content_fields")
+    content_record: dict | None = None
+    weekly_update: dict | None = None
+    if req.write_back:
+        client = _feishu(settings)
+        if client is None:
+            raise HTTPException(status_code=503, detail="Feishu env is not configured")
+        try:
+            if req.action == "confirm_generate" and content_fields:
+                content_record = await client.create_record(settings.content_table_id, content_fields)
+                new_record_id = (
+                    content_record.get("record", {}).get("record_id")
+                    or content_record.get("record_id")
+                    or content_record.get("id")
+                    or ""
+                )
+                updates["内容日历record_id"] = new_record_id
+                updates["日确认状态"] = "已生成内容日历"
+            if candidate_id != "inline-weekly-candidate":
+                weekly_update = await client.update_record(settings.weekly_pool_table_id, candidate_id, updates)
+        except FeishuError as exc:
+            detail = _feishu_writeback_detail(exc)
+            await _write_log(
+                settings,
+                run_id=run_id,
+                record_id=candidate_id,
+                node="plan_reselect",
+                status="failed",
+                input_hash=hashlib.sha256(
+                    json.dumps({"candidate_id": candidate_id, "action": req.action}, ensure_ascii=False).encode()
+                ).hexdigest(),
+                output_summary=detail["message"][:500],
+                decision_reason=detail["code"],
+                mode="commit",
+            )
+            raise HTTPException(status_code=502, detail=detail) from exc
+
+    await _write_log(
+        settings,
+        run_id=run_id,
+        record_id=candidate_id,
+        node="plan_reselect",
+        status="success",
+        input_hash=hashlib.sha256(json.dumps({"candidate_id": candidate_id, "action": req.action}, ensure_ascii=False).encode()).hexdigest(),
+        output_summary=f"action={req.action}, content_created={bool(content_record)}",
+        decision_reason=req.action,
+        mode="commit" if req.write_back else "dry-run",
+    )
+    return {
+        "ok": True,
+        "status": "plan-action-written" if req.write_back else "plan-action-dry-run",
+        "run_id": run_id,
+        "candidate_record_id": candidate_id,
+        "fields": updates,
+        "content_fields": content_fields,
+        "content_record": content_record,
+        "weekly_update": weekly_update,
+    }
+
+
 def _image_ratio_for_content(fields: dict) -> str:
     material_type = select_value(fields.get("素材类型"))
     slots = fields.get("发布位置")
@@ -297,7 +1212,15 @@ def _build_image_task_fields(record_id: str, fields: dict) -> tuple[dict, list[s
     mode = select_value(fields.get("图片生成模式")) or "Codex Image"
     scene_template = select_value(fields.get("场景模板")) or "FB/INS广告图"
     size = text_value(fields.get("图片生成尺寸")) or _image_ratio_for_content(fields)
-    references = product_reference_images(fields)
+    raw_references = product_reference_images(fields)
+    raw_design_refs = design_reference_images(fields)
+    raw_detail_refs = detail_reference_images(fields)
+    references, design_refs, detail_refs = _select_image_task_references(
+        raw_references,
+        raw_design_refs,
+        raw_detail_refs,
+    )
+    reference_strategy = select_value(fields.get("参考图使用策略")) or DEFAULT_REFERENCE_STRATEGY
     missing = []
     if mode != "Codex Image":
         missing.append("图片生成模式 must be Codex Image")
@@ -318,8 +1241,30 @@ def _build_image_task_fields(record_id: str, fields: dict) -> tuple[dict, list[s
             f"Source content_record_id: {record_id}",
             "Use case: FB/IG organic content candidate image.",
             "Generate a review candidate only.",
+            f"Reference strategy: {reference_strategy}. If reference inputs conflict, product fidelity wins over scene style.",
             (
-                "Mandatory product rule: use the attached 产品原图/reference image as the exact source of truth. "
+                "Reference roles: 设计参考图 is for scene, composition, mood, lighting, camera framing, and borrowing distance only; "
+                "do not copy competitor logos, text, product designs, platform/game UI, or brand marks from it."
+            ),
+            (
+                "Reference roles: 产品参考图包 is the product source of truth for shape, proportions, color, material, buttons, "
+                "ports, textures, visible markings, and accessory layout."
+            ),
+            (
+                "Reference roles: 细节参考图 overrides the broader product pack for small controls, icons, ports, surface patterns, "
+                "and other detail fidelity."
+            ),
+            (
+                "Reference budget: only selected master/detail references are attached to this task to avoid multi-angle fusion. "
+                "The full source pack may contain more images in Base, but do not blend unselected product angles or detail shots."
+            ),
+            (
+                "If 细节参考图 is provided, preserve the shown small-control count, relative positions, button shapes, icon shapes, "
+                "and icon directions. Do not reinterpret round/dot/home/minus/plus icons as letters, squares, generic symbols, "
+                "or decorative marks."
+            ),
+            (
+                "Mandatory product rule: use the attached 产品参考图包/产品原图/reference images as the exact source of truth. "
                 "Do not redesign, recolor, morph, simplify, replace, or invent product parts. "
                 "Only change the surrounding scene, lighting, camera angle, background, and composition."
             ),
@@ -327,6 +1272,22 @@ def _build_image_task_fields(record_id: str, fields: dict) -> tuple[dict, list[s
             image_prompt,
         ]
     )
+    feedback_patch = text_value(fields.get("图片重生Patch"))
+    feedback_change = text_value(fields.get("本轮只改什么"))
+    feedback_keep = text_value(fields.get("本轮必须保留"))
+    if feedback_patch or feedback_change or feedback_keep:
+        custom_prompt = "\n".join(
+            [
+                custom_prompt,
+                "Regeneration instructions from the approval card:",
+                "Keep these approved elements:",
+                feedback_keep or "(none specified)",
+                "Only change these elements:",
+                feedback_change or "(none specified)",
+                "Structured feedback patch JSON:",
+                feedback_patch or "{}",
+            ]
+        )
     task_fields = {
         "产品名称": product,
         "品牌": task_brand,
@@ -334,12 +1295,69 @@ def _build_image_task_fields(record_id: str, fields: dict) -> tuple[dict, list[s
         "状态": "待处理",
         "尺寸选择": size,
         "场景模板": scene_template,
+        "参考图使用策略": reference_strategy,
         "自定义提示词": custom_prompt,
     }
     if references:
+        task_fields["产品参考图包"] = references
         task_fields["产品原图"] = references
+    if design_refs:
+        task_fields["设计参考图"] = design_refs
+    if detail_refs:
+        task_fields["细节参考图"] = detail_refs
     raw = json.dumps(task_fields, ensure_ascii=False, sort_keys=True, default=str)
     return task_fields, missing, hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _reference_file_name(ref: dict, index: int, content_type: str) -> str:
+    name = text_value(ref.get("name") or ref.get("file_name"))
+    if name:
+        return name
+    ext_by_type = {
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+    return f"product_reference_{index + 1}{ext_by_type.get(content_type, '.png')}"
+
+
+async def _copy_product_references_to_image_base(
+    task_fields: dict,
+    *,
+    content_client: FeishuClient,
+    image_client: FeishuClient,
+) -> dict:
+    attachment_fields = ("产品原图", "产品参考图包", "设计参考图", "细节参考图")
+    if not any(isinstance(task_fields.get(field_name), list) and task_fields.get(field_name) for field_name in attachment_fields):
+        return task_fields
+    next_fields = dict(task_fields)
+    copied_by_source_token: dict[str, dict] = {}
+    for field_name in attachment_fields:
+        refs = task_fields.get(field_name)
+        if not isinstance(refs, list) or not refs:
+            continue
+        copied_refs = []
+        for index, ref in enumerate(refs):
+            if not isinstance(ref, dict):
+                continue
+            file_token = text_value(ref.get("file_token") or ref.get("token"))
+            if not file_token:
+                continue
+            if file_token not in copied_by_source_token:
+                content, content_type = await content_client.download_media(file_token)
+                file_name = _reference_file_name(ref, index, content_type)
+                copied_token = await image_client.upload_bitable_media(
+                    file_name=file_name,
+                    content=content,
+                    content_type=content_type,
+                )
+                copied_by_source_token[file_token] = {"file_token": copied_token, "name": file_name}
+            copied_refs.append(copied_by_source_token[file_token])
+        if copied_refs:
+            next_fields[field_name] = copied_refs
+    return next_fields
 
 
 def _image_task_candidate_reason(fields: dict, *, force: bool = False) -> tuple[bool, str]:
@@ -376,6 +1394,29 @@ def _image_result_ingest_candidate_reason(fields: dict, *, force: bool = False) 
     if text_value(fields.get("AI生成图链接")) and text_value(fields.get("生成图片file_token")):
         return False, "image_result_already_ingested"
     return True, "candidate"
+
+
+PENDING_IMAGE_TASK_STATUSES = {"empty", "待处理", "已提交", "生成中", "处理中", "pending", "running"}
+
+
+def _is_pending_image_result(item: dict) -> bool:
+    if item.get("ok"):
+        return False
+    blocking = item.get("blocking") or []
+    codes = [text_value(entry.get("code") if isinstance(entry, dict) else entry) for entry in blocking]
+    if not codes:
+        return False
+    has_missing_result = any(code == "IMAGE_RESULT_MISSING" for code in codes)
+    task_not_done_codes = [code for code in codes if code.startswith("IMAGE_TASK_NOT_DONE:")]
+    other_codes = [
+        code
+        for code in codes
+        if code != "IMAGE_RESULT_MISSING" and not code.startswith("IMAGE_TASK_NOT_DONE:")
+    ]
+    if other_codes or not task_not_done_codes:
+        return False
+    statuses = [code.split(":", 1)[1] or "empty" for code in task_not_done_codes]
+    return has_missing_result and all(status in PENDING_IMAGE_TASK_STATUSES for status in statuses)
 
 
 def _extract_image_result_fields(image_task_record_id: str, image_task_fields: dict) -> tuple[dict, list[str]]:
@@ -463,6 +1504,13 @@ async def _execute_image_task(req: ImageTaskRequest, settings: Settings) -> dict
     content_client = _feishu(settings)
     if image_client is None or content_client is None:
         raise HTTPException(status_code=503, detail="Feishu env is not configured")
+    task_fields = await _copy_product_references_to_image_base(
+        task_fields,
+        content_client=content_client,
+        image_client=image_client,
+    )
+    raw_task_fields = json.dumps(task_fields, ensure_ascii=False, sort_keys=True, default=str)
+    task_hash = hashlib.sha256(raw_task_fields.encode("utf-8")).hexdigest()
     created = await image_client.create_record(settings.image_task_table_id, task_fields)
     image_task_record_id = text_value(created.get("record", {}).get("record_id")) or text_value(created.get("record_id"))
     if record_id != "inline" and image_task_record_id:
@@ -616,11 +1664,13 @@ async def _execute_image_result_ingest_scan(req: ImageResultIngestScanRequest, s
         results.append(item)
 
     ingested = sum(1 for item in results if item.get("ok"))
-    failed = sum(1 for item in results if not item.get("ok"))
+    pending = sum(1 for item in results if _is_pending_image_result(item))
+    failed = sum(1 for item in results if not item.get("ok") and not _is_pending_image_result(item))
     summary = {
         "scanned": len(records),
         "selected": len(selected),
         "ingested": ingested,
+        "pending": pending,
         "failed": failed,
         "write_back": req.write_back,
         "source": req.source,
@@ -645,12 +1695,13 @@ async def _execute_image_result_ingest_scan(req: ImageResultIngestScanRequest, s
         ),
     )
     return {
-        "ok": all(item.get("ok") for item in results) if results else True,
+        "ok": failed == 0,
         "status": "image-ingest-scan-complete",
         "scan_run_id": scan_run_id,
         "scanned": len(records),
         "selected": len(selected),
         "ingested": ingested,
+        "pending": pending,
         "failed": failed,
         "write_back": req.write_back,
         "results": results,
@@ -1294,6 +2345,98 @@ async def _execute_generate_scan(req: GenerateScanRequest, settings: Settings) -
     }
 
 
+async def _execute_approval_action(req: ApprovalActionRequest, settings: Settings) -> dict:
+    run_id = f"approv1-{uuid.uuid4().hex[:16]}"
+    record_id, record = await _load_approval_record(req, settings)
+    fields = normalize_fields(record)
+    updates = approval_update_fields(
+        req.action,
+        fields,
+        feedback_text=req.feedback_text,
+        copy_overrides=req.copy_overrides,
+        feedback_dimensions=req.feedback_dimensions,
+        feedback_tags=req.feedback_tags,
+        keep=req.keep,
+        change=req.change,
+        avoid=req.avoid,
+    )
+    mode = "commit" if req.write_back else "dry-run"
+    input_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "action": req.action,
+                "record_id": record_id,
+                "feedback_text": req.feedback_text,
+                "copy_overrides": req.copy_overrides,
+                "feedback_dimensions": req.feedback_dimensions,
+                "feedback_tags": req.feedback_tags,
+                "create_image_task": req.create_image_task,
+                "updates": updates,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+    if req.write_back and not settings.approval_writeback_enabled:
+        await _write_log(
+            settings,
+            run_id=run_id,
+            record_id=record_id,
+            node="approval/action-gate",
+            status="blocked",
+            input_hash=input_hash,
+            output_summary="SOCIAL_APPROVAL_WRITEBACK_ENABLED=false",
+            decision_reason="APPROVAL_WRITEBACK_DISABLED",
+            mode=mode,
+        )
+        return {"ok": False, "status": "blocked", "run_id": run_id, "blocking": [{"code": "APPROVAL_WRITEBACK_DISABLED"}], "fields": updates}
+
+    if req.write_back:
+        if record_id == "inline":
+            raise HTTPException(status_code=400, detail="write_back requires a persisted record_id")
+        client = _feishu(settings)
+        if client is None:
+            raise HTTPException(status_code=503, detail="Feishu env is not configured")
+        await client.update_record(settings.content_table_id, record_id, updates)
+
+    image_task_result = None
+    if req.create_image_task and req.action in {"regenerate_image", "regenerate_both"}:
+        merged_fields = dict(fields)
+        merged_fields.update(updates)
+        image_task_result = await _execute_image_task(
+            ImageTaskRequest(
+                record_id=record_id,
+                record={"record_id": record_id, "fields": merged_fields},
+                write_task=req.write_back,
+                source="manual",
+                force=True,
+            ),
+            settings=settings,
+        )
+
+    await _write_log(
+        settings,
+        run_id=run_id,
+        record_id=record_id,
+        node="approval/action",
+        status="success" if req.write_back else "dry-run",
+        input_hash=input_hash,
+        output_summary=json.dumps(updates, ensure_ascii=False, default=str),
+        decision_reason=req.action,
+        mode=mode,
+    )
+    ok = image_task_result.get("ok") if image_task_result is not None else True
+    return {
+        "ok": bool(ok),
+        "status": "approval-updated" if req.write_back else "approval-dry-run",
+        "run_id": run_id,
+        "fields": updates,
+        "image_task": image_task_result,
+    }
+
+
 @app.get("/health")
 async def health(settings: Settings = Depends(get_settings)):
     return {
@@ -1303,12 +2446,116 @@ async def health(settings: Settings = Depends(get_settings)):
         "image_task_write_enabled": settings.image_task_write_enabled,
         "image_result_writeback_enabled": settings.image_result_writeback_enabled,
         "asset_prepare_enabled": settings.asset_prepare_enabled,
+        "approval_writeback_enabled": settings.approval_writeback_enabled,
+        "plan_writeback_enabled": settings.plan_writeback_enabled,
         "feishu_configured": settings.feishu_enabled(),
         "image_task_configured": settings.image_task_enabled(),
+        "product_index_configured": bool(settings.product_index_table_id),
+        "kol_candidate_configured": bool(settings.kol_candidate_table_id),
         "meta_configured": settings.meta_enabled(),
         "generation_ai_provider": settings.generation_ai_provider,
         "generation_ai_configured": settings.generation_ai_enabled(),
     }
+
+
+@app.post("/plan/weekly")
+async def plan_weekly(
+    req: PlanWeeklyRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_plan_weekly(req, settings=settings)
+
+
+@app.post("/plan/daily-confirm")
+async def plan_daily_confirm(
+    req: PlanDailyConfirmRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_plan_daily_confirm(req, settings=settings)
+
+
+@app.post("/plan/reselect")
+async def plan_reselect(
+    req: PlanReselectRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_plan_reselect(req, settings=settings)
+
+
+@app.post("/plan/weekly-input-card")
+async def plan_weekly_input_card(
+    req: WeeklyInputCardRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_weekly_input_card(req, settings=settings)
+
+
+@app.post("/plan/weekly-input-action")
+async def plan_weekly_input_action(
+    req: WeeklyInputActionRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_weekly_input_action(req, settings=settings)
+
+
+@app.post("/plan/product-index/sync")
+async def plan_product_index_sync(
+    req: ProductIndexSyncRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_product_index_sync(req, settings=settings)
+
+
+@app.post("/discovery/reference/weekly")
+async def discovery_reference_weekly(
+    req: ReferenceWeeklyDiscoveryRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_reference_weekly(req, settings=settings)
+
+
+@app.post("/discovery/kol/weekly")
+async def discovery_kol_weekly(
+    req: KolWeeklyDiscoveryRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_kol_weekly(req, settings=settings)
+
+
+@app.post("/discovery/kol/visual-posts")
+async def discovery_kol_visual_posts(
+    req: KolVisualPostDiscoveryRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_kol_visual_posts(req, settings=settings)
+
+
+@app.post("/discovery/kol/action")
+async def discovery_kol_action(
+    req: KolActionRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_kol_action(req, settings=settings)
 
 
 @app.post("/generate/brief")
@@ -1369,6 +2616,27 @@ async def image_task_ingest_scan(
 ):
     _check_auth(settings, authorization)
     return await _execute_image_result_ingest_scan(req, settings=settings)
+
+
+@app.post("/approval/card-preview")
+async def approval_card_preview_endpoint(
+    req: ApprovalCardPreviewRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    record_id, record = await _load_approval_record(req, settings)
+    return {"ok": True, "status": "approval-card-preview", "card": approval_card_preview(record_id, normalize_fields(record))}
+
+
+@app.post("/approval/action")
+async def approval_action(
+    req: ApprovalActionRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_approval_action(req, settings=settings)
 
 
 @app.post("/publish/scan")

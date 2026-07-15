@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import mimetypes
 from typing import Any
 
 import httpx
@@ -15,7 +16,14 @@ DATETIME_FIELD_NAMES = {
     "AI生成时间",
     "审批通过时间",
     "计划发布时间",
+    "计划日期",
+    "日确认时间",
     "实际发布时间",
+}
+
+NUMBER_FIELD_NAMES = {
+    "重推次数",
+    "重生版本号",
 }
 
 URL_FIELD_NAMES = {
@@ -25,6 +33,14 @@ URL_FIELD_NAMES = {
     "目标链接",
     "前台链接",
     "主图URL",
+    "账号链接",
+    "账号/帖子URL",
+    "样例帖子1链接",
+    "样例帖子2链接",
+    "样例帖子1图片",
+    "样例帖子2图片",
+    "视觉参考缩略图",
+    "样例图片链接",
 }
 
 
@@ -41,6 +57,9 @@ def _datetime_to_ms(value: Any) -> Any:
         raw = value.strip()
         if not raw:
             return value
+        if raw.isdigit():
+            number = int(raw)
+            return number if number > 10_000_000_000 else number * 1000
         try:
             parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         except ValueError:
@@ -70,14 +89,39 @@ def _url_text_to_link(value: Any) -> Any:
     return {"link": first_url, "text": raw}
 
 
+def _number_to_number(value: Any) -> Any:
+    if value in ("", None):
+        return value
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return value
+        try:
+            parsed = float(raw)
+        except ValueError:
+            return value
+        return int(parsed) if parsed.is_integer() else parsed
+    return value
+
+
 def _normalize_bitable_fields(fields: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(fields)
     for name in DATETIME_FIELD_NAMES:
         if name in normalized:
             normalized[name] = _datetime_to_ms(normalized[name])
+    for name in NUMBER_FIELD_NAMES:
+        if name in normalized:
+            normalized[name] = _number_to_number(normalized[name])
     for name in URL_FIELD_NAMES:
         if name in normalized:
-            normalized[name] = _url_text_to_link(normalized[name])
+            if normalized[name] in ("", None):
+                normalized.pop(name)
+            else:
+                normalized[name] = _url_text_to_link(normalized[name])
     return normalized
 
 
@@ -128,6 +172,68 @@ class FeishuClient:
             raise FeishuError(f"Feishu media download error: HTTP {resp.status_code}")
         content_type = resp.headers.get("content-type", "image/png").split(";")[0].strip() or "image/png"
         return resp.content, content_type
+
+    async def upload_bitable_media(self, *, file_name: str, content: bytes, content_type: str = "image/png") -> str:
+        token = await self._tenant_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        safe_name = file_name.strip() or "product_reference.png"
+        guessed = mimetypes.guess_type(safe_name)[0]
+        media_type = content_type or guessed or "application/octet-stream"
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{self._base}/drive/v1/medias/upload_all",
+                headers=headers,
+                data={
+                    "file_name": safe_name,
+                    "parent_type": "bitable_file",
+                    "parent_node": self.base_token,
+                    "size": str(len(content)),
+                },
+                files={"file": (safe_name, content, media_type)},
+            )
+        data = resp.json() if resp.content else {}
+        if resp.status_code >= 400 or data.get("code") not in (0, None):
+            raise FeishuError(f"Feishu media upload error: HTTP {resp.status_code}, code={data.get('code')}, msg={data.get('msg')}")
+        file_token = data.get("data", {}).get("file_token")
+        if not file_token:
+            raise FeishuError("Feishu media upload error: missing file_token")
+        return file_token
+
+    async def upload_message_image(self, *, file_name: str, content: bytes, content_type: str = "image/png") -> str:
+        token = await self._tenant_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        safe_name = file_name.strip() or "reference_preview.png"
+        guessed = mimetypes.guess_type(safe_name)[0]
+        media_type = content_type or guessed or "application/octet-stream"
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{self._base}/im/v1/images",
+                headers=headers,
+                data={"image_type": "message"},
+                files={"image": (safe_name, content, media_type)},
+            )
+        data = resp.json() if resp.content else {}
+        if resp.status_code >= 400 or data.get("code") not in (0, None):
+            raise FeishuError(f"Feishu image upload error: HTTP {resp.status_code}, code={data.get('code')}, msg={data.get('msg')}")
+        image_key = data.get("data", {}).get("image_key")
+        if not image_key:
+            raise FeishuError("Feishu image upload error: missing image_key")
+        return image_key
+
+    async def upload_message_image_from_url(self, image_url: str, *, file_name: str = "reference_preview.png") -> str:
+        raw = image_url.strip()
+        if not raw.lower().startswith(("http://", "https://")):
+            raise FeishuError("Feishu image upload error: image_url must be http(s)")
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            resp = await client.get(raw)
+        if resp.status_code >= 400:
+            raise FeishuError(f"Feishu image upload error: source image HTTP {resp.status_code}")
+        content_type = resp.headers.get("content-type", "image/png").split(";")[0].strip() or "image/png"
+        if not content_type.startswith("image/"):
+            raise FeishuError(f"Feishu image upload error: source content-type is {content_type}")
+        if len(resp.content) > 10 * 1024 * 1024:
+            raise FeishuError("Feishu image upload error: source image exceeds 10MB")
+        return await self.upload_message_image(file_name=file_name, content=resp.content, content_type=content_type)
 
     async def get_record(self, table_id: str, record_id: str) -> dict[str, Any]:
         data = await self._request(

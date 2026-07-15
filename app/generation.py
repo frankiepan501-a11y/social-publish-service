@@ -42,12 +42,26 @@ IMAGE_PROMPT_FORBIDDEN_PRODUCT_CHANGE_RE = re.compile(
 )
 
 PRODUCT_REFERENCE_FIELD_NAMES = (
+    "产品参考图包",
     "产品参考图",
     "产品原图",
     "产品图片",
     "产品库图片",
     "图片",
 )
+DESIGN_REFERENCE_FIELD_NAMES = (
+    "设计参考图",
+    "竞品参考图",
+    "社媒参考图",
+    "博主参考图",
+)
+DETAIL_REFERENCE_FIELD_NAMES = (
+    "细节参考图",
+    "按键参考图",
+    "纹路参考图",
+    "接口参考图",
+)
+DEFAULT_REFERENCE_STRATEGY = "产品保真优先"
 FUNLAB_IP_ALLOWED_STATUSES = {"合规-无IP", "合规-已授权"}
 FUNLAB_IP_STATUS_FIELD_NAMES = ("IP合规状态", "产品库IP合规状态")
 REFERENCE_SOURCE_OF_TRUTH_RULE = (
@@ -122,6 +136,7 @@ class GenerationPayload:
     hook_hypothesis: str
     caption_en: str
     hashtags_en: str
+    seo_geo_note: str
     caption_cn_note: str
     image_prompt: str
     publish_checklist: str
@@ -143,8 +158,26 @@ def generation_input_hash(fields: dict[str, Any]) -> str:
         "产品库IP合规状态",
         "IP合规状态",
         "IP合规备注",
+        "设计参考图",
+        "产品参考图包",
         "产品参考图",
         "产品原图",
+        "细节参考图",
+        "参考图使用策略",
+        "参考对象",
+        "参考对象链接",
+        "参考理由",
+        "借鉴元素",
+        "禁止复制元素",
+        "选题来源",
+        "SEO主关键词",
+        "GEO目标问题",
+        "搜索意图",
+        "语义实体词",
+        "长尾关键词",
+        "目标落地页",
+        "Hashtag词组池",
+        "SEO/GEO生成说明",
         "品牌",
         "平台",
         "发布位置",
@@ -160,14 +193,26 @@ def generation_input_hash(fields: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def product_reference_images(fields: dict[str, Any]) -> list[Any]:
-    for field_name in PRODUCT_REFERENCE_FIELD_NAMES:
+def _reference_images_from_fields(fields: dict[str, Any], field_names: tuple[str, ...]) -> list[Any]:
+    for field_name in field_names:
         value = fields.get(field_name)
         if isinstance(value, list) and value:
             return value
         if isinstance(value, dict) and value:
             return [value]
     return []
+
+
+def product_reference_images(fields: dict[str, Any]) -> list[Any]:
+    return _reference_images_from_fields(fields, PRODUCT_REFERENCE_FIELD_NAMES)
+
+
+def design_reference_images(fields: dict[str, Any]) -> list[Any]:
+    return _reference_images_from_fields(fields, DESIGN_REFERENCE_FIELD_NAMES)
+
+
+def detail_reference_images(fields: dict[str, Any]) -> list[Any]:
+    return _reference_images_from_fields(fields, DETAIL_REFERENCE_FIELD_NAMES)
 
 
 def has_product_reference_image(fields: dict[str, Any]) -> bool:
@@ -252,6 +297,18 @@ def build_prompt(fields: dict[str, Any]) -> tuple[str, str]:
     reference_available = has_product_reference_image(fields)
     target_url = text_value(fields.get("目标链接"))
     offer = "yes" if bool_value(fields.get("权益内容")) else "no"
+    reference_object = text_value(fields.get("参考对象"))
+    reference_reason = text_value(fields.get("参考理由"))
+    borrow_elements = text_value(fields.get("借鉴元素"))
+    forbidden_elements = text_value(fields.get("禁止复制元素"))
+    seo_keyword = text_value(fields.get("SEO主关键词"))
+    geo_question = text_value(fields.get("GEO目标问题"))
+    search_intent = select_value(fields.get("搜索意图"))
+    semantic_entities = text_value(fields.get("语义实体词"))
+    long_tail_keywords = text_value(fields.get("长尾关键词"))
+    landing_page = text_value(fields.get("目标落地页"))
+    hashtag_pool = text_value(fields.get("Hashtag词组池"))
+    seo_geo_instruction = text_value(fields.get("SEO/GEO生成说明"))
 
     system = (
         "You generate operational social media drafts for an ecommerce gaming accessories brand. "
@@ -265,6 +322,7 @@ def build_prompt(fields: dict[str, Any]) -> tuple[str, str]:
             "hook_hypothesis": "English one-sentence experiment hypothesis.",
             "caption_en": "English platform-native caption, concise, no banned terms.",
             "hashtags_en": "5-8 English hashtags, no unauthorized IP terms.",
+            "seo_geo_note": "Chinese note explaining how caption and hashtags naturally support SEO/GEO.",
             "caption_cn_note": "Chinese explanation of why the caption works.",
             "image_prompt": "English image generation/editing prompt for a product visual candidate.",
             "publish_checklist": "Chinese checklist separated by newlines.",
@@ -291,7 +349,24 @@ def build_prompt(fields: dict[str, Any]) -> tuple[str, str]:
             "ip_compliance_note": ip_note,
             "ip_association": ip_association,
             "target_url_present": bool(target_url),
+            "target_landing_page_present": bool(landing_page),
             "offer_content": offer,
+        },
+        "reference_object": {
+            "name": reference_object,
+            "reason": reference_reason,
+            "borrow_elements": borrow_elements,
+            "do_not_copy": forbidden_elements,
+        },
+        "seo_geo": {
+            "primary_keyword": seo_keyword,
+            "target_geo_question": geo_question,
+            "search_intent": search_intent,
+            "semantic_entities": semantic_entities,
+            "long_tail_keywords": long_tail_keywords,
+            "landing_page": landing_page,
+            "hashtag_layer_pool": hashtag_pool,
+            "operator_instruction": seo_geo_instruction,
         },
         "brand_rules": brand_rules,
         "image_reference_rule": REFERENCE_SOURCE_OF_TRUTH_RULE,
@@ -305,6 +380,11 @@ def build_prompt(fields: dict[str, Any]) -> tuple[str, str]:
             "Do not claim official license unless explicitly provided.",
             "Do not write cold DM copy.",
             "Do not create more than one experiment variable.",
+            "Caption first sentence must naturally answer or echo the SEO primary keyword or GEO question; do not keyword-stuff.",
+            "Hashtags must be selected from layered pools: brand, category, scene, intent, and community. Use 5-8 total.",
+            "If a reference object is provided, borrow only scene, composition, lighting, camera angle, pacing, or mood.",
+            "Do not copy competitor product appearance, logo, layout, exact caption, watermark, or protected brand/IP assets.",
+            "Return seo_geo_note so operators can see why the caption and hashtags match the SEO/GEO strategy.",
             "Image prompt must not ask to render new logos, text overlays, watermarks, or unauthorized IP characters.",
             "Preserve only logos or markings already visible in the reference image.",
             "Do not expose internal IP-inspired model names or protected game-world terms in caption, hashtags, or image prompt.",
@@ -325,11 +405,18 @@ def fallback_generation(fields: dict[str, Any]) -> GenerationPayload:
     material_type = select_value(fields.get("素材类型")) or "single_image"
     product_brief = text_value(fields.get("产品库产品简述"))
     product_detail = f" Product library note: {product_brief}." if product_brief else ""
+    seo_keyword = text_value(fields.get("SEO主关键词"))
+    geo_question = text_value(fields.get("GEO目标问题"))
+    search_intent = select_value(fields.get("搜索意图"))
+    hashtag_pool = normalize_hashtags(text_value(fields.get("Hashtag词组池")))
+    reference_object = text_value(fields.get("参考对象"))
+    borrow_elements = text_value(fields.get("借鉴元素"))
+    forbidden_elements = text_value(fields.get("禁止复制元素"))
 
-    caption = (
-        f"Make your setup feel more intentional with {product}. "
-        f"Built around {selling_points}, it keeps the focus on the way you actually play."
-    )
+    opening = f"{seo_keyword} starts with a setup that feels intentional." if seo_keyword else f"Make your setup feel more intentional with {product}."
+    if geo_question:
+        opening = f"If you are asking, \"{geo_question}\", start with one detail that changes how the setup feels."
+    caption = f"{opening} Built around {selling_points}, {product} keeps the focus on the way you actually play."
     if signal in {"Saves", "Profile Visits"}:
         caption += " Save this for your next setup refresh."
     elif signal in {"Comments", "Shares"}:
@@ -351,6 +438,8 @@ def fallback_generation(fields: dict[str, Any]) -> GenerationPayload:
         f"{REFERENCE_SOURCE_OF_TRUTH_RULE} "
         f"Product photography concept for {product_label}: {brand_rules['visual']} "
         f"{brand_rules.get('photo_style', '')} {brand_rules.get('must', '')}{product_detail} "
+        f"Reference object to borrow from: {reference_object or 'none'}; borrow only: {borrow_elements or 'scene, light, composition'}; "
+        f"do not copy: {forbidden_elements or 'competitor products, logos, text, watermark, or protected IP'}. "
         f"Show one clear use case, clean composition, product-first framing, no text, no new logo overlay, "
         f"preserve only markings already visible in the reference image, no watermark, no unauthorized IP characters. "
         f"Format: {material_type}."
@@ -372,12 +461,16 @@ def fallback_generation(fields: dict[str, Any]) -> GenerationPayload:
             "不承诺官方授权、医疗/性能绝对化或竞品对标",
         ]
     )
-    hashtags = "#GamingSetup #SwitchAccessories #DeskSetup #GameRoom #ControllerSetup #SetupInspo"
+    hashtags = hashtag_pool if hashtag_pool else "#GamingSetup #SwitchAccessories #DeskSetup #GameRoom #ControllerSetup #SetupInspo"
     return GenerationPayload(
         brief=brief,
         hook_hypothesis=hook,
         caption_en=caption,
         hashtags_en=hashtags,
+        seo_geo_note=(
+            f"SEO/GEO：首句自然承接 `{seo_keyword or geo_question or product}`，搜索意图={search_intent or '未指定'}；"
+            "hashtag 采用品牌/品类/场景/意图/社区分层，不堆竞品词。"
+        ),
         caption_cn_note=f"围绕 {pillar} 和 {signal} 写，保留 {experiment} 作为唯一变量，避免外链硬广感。",
         image_prompt=image_prompt,
         publish_checklist=checklist,
@@ -403,6 +496,7 @@ def parse_ai_json(raw: str) -> GenerationPayload:
         hook_hypothesis=text_value(data.get("hook_hypothesis")),
         caption_en=text_value(data.get("caption_en")),
         hashtags_en=text_value(data.get("hashtags_en")),
+        seo_geo_note=text_value(data.get("seo_geo_note")),
         caption_cn_note=text_value(data.get("caption_cn_note")),
         image_prompt=text_value(data.get("image_prompt")),
         publish_checklist=text_value(data.get("publish_checklist")),
@@ -415,6 +509,7 @@ def parse_ai_json(raw: str) -> GenerationPayload:
 def harden_generation_payload(payload: GenerationPayload) -> GenerationPayload:
     hashtags = normalize_hashtags(payload.hashtags_en)
     image_prompt = text_value(payload.image_prompt)
+    seo_geo_note = text_value(payload.seo_geo_note) or "SEO/GEO：使用自然语义承接关键词或目标问题，hashtag 按品牌/品类/场景/意图/社区分层。"
     image_lower = image_prompt.lower()
     if not ("reference image" in image_lower and "preserve" in image_lower):
         image_prompt = f"{REFERENCE_SOURCE_OF_TRUTH_RULE} {image_prompt}".strip()
@@ -438,6 +533,7 @@ def harden_generation_payload(payload: GenerationPayload) -> GenerationPayload:
         hook_hypothesis=payload.hook_hypothesis,
         caption_en=payload.caption_en,
         hashtags_en=hashtags,
+        seo_geo_note=seo_geo_note,
         caption_cn_note=payload.caption_cn_note,
         image_prompt=image_prompt,
         publish_checklist=payload.publish_checklist,
@@ -501,6 +597,7 @@ def validate_generation_payload(payload: GenerationPayload, source_fields: dict[
         "hook_hypothesis": payload.hook_hypothesis,
         "caption_en": payload.caption_en,
         "hashtags_en": payload.hashtags_en,
+        "seo_geo_note": payload.seo_geo_note,
         "caption_cn_note": payload.caption_cn_note,
         "image_prompt": payload.image_prompt,
         "publish_checklist": payload.publish_checklist,
@@ -514,6 +611,10 @@ def validate_generation_payload(payload: GenerationPayload, source_fields: dict[
 
     if "#" not in payload.hashtags_en:
         issues.append("HASHTAG_FORMAT_INVALID")
+    if source_fields and any(text_value(source_fields.get(name)) for name in ("SEO主关键词", "GEO目标问题", "Hashtag词组池")):
+        hashtag_count = len([token for token in payload.hashtags_en.split() if token.startswith("#")])
+        if hashtag_count < 5 or hashtag_count > 8:
+            issues.append("HASHTAG_LAYER_COUNT_INVALID")
 
     caption_lower = payload.caption_en.lower()
     for term in GENERATION_BLOCK_TERMS:
@@ -566,6 +667,7 @@ def build_update_fields(fields: dict[str, Any], payload: GenerationPayload, *, r
         "AI生成Brief": payload.brief,
         "Hook假设": payload.hook_hypothesis,
         "中文说明": payload.caption_cn_note,
+        "SEO/GEO生成说明": payload.seo_geo_note,
         "发布Checklist": payload.publish_checklist,
         "风险Checklist": payload.risk_checklist,
         "审批风险等级": payload.risk_level if payload.risk_level in {"normal", "high-risk", "blocked"} else "normal",

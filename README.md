@@ -13,6 +13,7 @@ Safety defaults:
 - `SOCIAL_IMAGE_TASK_WRITE_ENABLED=false` blocks writing Codex Image Worker tasks.
 - `SOCIAL_IMAGE_RESULT_WRITEBACK_ENABLED=false` blocks image result writeback to the content calendar.
 - `SOCIAL_ASSET_PREPARE_ENABLED=false` blocks `file_token` -> Meta CDN URL preparation.
+- `SOCIAL_APPROVAL_WRITEBACK_ENABLED=false` blocks approval-card callbacks from writing operator decisions back to Feishu.
 - tokens are read only from environment variables.
 - content generation defaults to deterministic template mode when no AI key is configured.
 - `/publish/dry-run` runs validation without posting.
@@ -42,11 +43,51 @@ Generation scan:
 Image task bridge:
 - `POST /image-task/create` builds one Codex Image Worker task payload from a content calendar record.
 - `POST /image-task/scan` selects records with `AI图片Prompt`, `图片生成模式=Codex Image`, product reference image available, and no existing `图片任务record_id`, then calls the same task builder.
-- Codex Image tasks must carry `产品原图`; the worker prompt treats that image as the single source of truth and allows only scene, lighting, camera, background, and composition changes.
+- Codex Image tasks now carry three explicit reference roles:
+  - `设计参考图`: competitor/creator/social reference for scene, composition, mood, lighting, and camera only. It must not change the product or copy logos/text/brand marks.
+  - `产品参考图包`: product source-of-truth pack for product shape, proportions, color, material, buttons, ports, textures, visible markings, and accessory layout.
+  - `细节参考图`: detail override pack for small buttons, icons, ports, shell pattern, and other high-risk product-fidelity details.
+- `参考图使用策略` defaults to `产品保真优先`. If references conflict, `产品参考图包` and `细节参考图` override `设计参考图`.
+- The service still writes legacy `产品原图` with the same attachments as `产品参考图包` so old deployment workers remain compatible.
 - `POST /image-task/ingest` maps a worker result back to content fields such as `图片生成状态`, `生成图片file_token`, and `AI生成图链接`.
 - `POST /image-task/ingest-scan` selects content records that already have `图片任务record_id` but do not yet have a complete image result, then calls the same ingest path per record.
-- The Codex Image Worker remains a local POC. The service only creates/reads Feishu task records after explicit gates are opened.
+- The Codex Image Worker is an external deployment-terminal consumer, normally bound to the Feishu image task table. This service only creates/reads Feishu task records after explicit gates are opened, and current-machine worker deployment is not required.
+- Pending worker states such as `待处理`, `已提交`, `生成中`, `处理中`, `pending`, and `running` are treated as pending no-ops by `/image-task/ingest-scan`, not as scheduler failures.
 - Feishu Drive folder URLs are not treated as publishable FB/IG image URLs. Prefer `生成图片file_token`; commit can convert it to a Meta-hosted URL only when `SOCIAL_ASSET_PREPARE_ENABLED=true`.
+
+Approval callback:
+- `POST /approval/card-preview` returns a card payload model for one content calendar record.
+- `POST /approval/action` maps operator decisions to content-calendar field updates.
+- Supported actions: `approve_schedule`, `regenerate_image`, `regenerate_copy`, `regenerate_both`, `reject`.
+- Image regeneration feedback v3 uses 12 single-select dimensions in `feedback_dimensions`, mirrored to content-calendar fields `图片反馈-*`: product fidelity, composition, camera angle, depth layers, scene type, background/surface, props, lighting, color palette, style, platform fit, and risk control.
+- Copy feedback can include `copy_overrides` with `caption_en` and/or `hashtag_en`. When present, `regenerate_copy` writes the operator-edited `Caption EN` / `Hashtag EN` directly, sets `文案人工锁定=true`, and does not mark `AI生成状态=待生成`. Without overrides, it keeps the old AI regeneration flow through `文案修改意见`.
+- `regenerate_both` can combine image feedback and copy overrides: image fields still move to `图片生成状态=待生成`; changed copy fields are written directly and locked.
+- Legacy `feedback_tags` are still accepted for older callbacks, but `/approval/card-preview` no longer exposes flat feedback buttons.
+- FUNLAB hidden/emissive shell linework is a server-side brand hard rule, not an operator-selectable issue. For FUNLAB records the patch automatically adds `FUNLAB_HIDDEN_EMISSIVE_PATTERN` to keep teal contour graphics as embedded luminous linework, not flat printed graphics.
+- The endpoint returns dry-run updates by default. Real Feishu writeback requires both `write_back=true` and `SOCIAL_APPROVAL_WRITEBACK_ENABLED=true`.
+- Regenerating an image clears stale image task/result fields and moves `图片生成状态=待生成`; it does not approve, confirm final assets, or publish.
+- When `create_image_task=true`, image regeneration also builds the next Codex Image task from the patched fields. With `write_back=false`, the image task is dry-run only and returned in the response. With `write_back=true`, the task is written only if `SOCIAL_IMAGE_TASK_WRITE_ENABLED=true`.
+- `scripts/send_approval_card_v3.py --send` sends a real v3 Feishu whole-post review card through the event-hub app. It reuses `IMAGE_FEEDBACK_DIMENSIONS`, uploads the design-reference/current generated images as IM images, displays the current `Caption EN` / `Hashtag EN`, and includes editable `caption_en_override` / `hashtag_en_override` inputs. Product reference images are for internal image-generation source-of-truth, not the operator comparison slot.
+- The card button value carries `original_caption_en` / `original_hashtag_en`; n8n compares submitted input values against those originals and only sends changed text in `copy_overrides`. This prevents prefilled inputs from locking unchanged copy accidentally.
+- Feishu form cards must put `form_submit` buttons directly under `form.elements`. Do not wrap submit buttons in an `action` container inside a form, because the Feishu client can silently hide the whole form.
+
+Weekly planning and discovery:
+- `POST /plan/weekly-input-card` returns the Monday four-account strategy card payload for FUNLAB FB, FUNLAB IG, POWKONG FB, and POWKONG IG. n8n sends the card; the service does not send Feishu IM by itself.
+- `POST /plan/weekly-input-action` locks weekly strategies from operator submissions. Empty submissions fall back to defaults. Product pool input is resolved through `社媒产品索引缓存` first, with ERP SKU / brand-model text as fallback.
+- `POST /plan/product-index/sync` builds product dropdown rows from product-library records. Writeback is gated by `SOCIAL_PLAN_WRITEBACK_ENABLED=true`.
+- `POST /discovery/reference/weekly` creates AI weekly competitor/design reference candidates in `待确认` state. Only references with `状态=可用` are eligible for `/plan/weekly`.
+- `POST /discovery/kol/weekly` returns KOL image-reference review cards for candidates that pass the IG/FB image-post gate. This card is for selecting reusable scene/composition/light/product-slot references, not for approving KOL collaborations or posts. Instagram account homepages, YouTube links, Reels/video pages, generic websites, and obvious placeholder URLs are excluded; if no candidate passes, the endpoint returns zero cards instead of fabricating weak references. The weekly endpoint also accepts `visual_posts` plus `min_visual_score`, so n8n or a discovery agent can repush a KOL card through the existing weekly branch after collecting IG/FB image-post URLs and screenshots. When `prepare_image_keys=true`, the service downloads the thumbnail/screenshot URL, uploads it to Feishu IM, and returns card `img` elements with `样例帖子1图片Key / 样例帖子2图片Key`.
+- `POST /discovery/kol/visual-posts` scores already-collected public IG/FB image-post candidates. Ready candidates must include a post-level IG/FB image-post URL plus a thumbnail/screenshot URL. For production review cards, pass `prepare_image_keys=true` so the service prepares Feishu `image_key` values and embeds the preview image directly; callers may also pass existing `thumbnail_image_key` / `screenshot_image_key`. Weak links are returned in `rejected` with the reason. This endpoint is the stable entry for later discovery agents or operator-supplied post lists, not a login-wall crawler. The visual gate is image-first: reject selfie/portrait/creator-face/person-first posts even if the account is gaming-related; accept hands-only, product-dominant, flat-lay, desk setup, TV-background, close-up, and other posts where the product slot can be replaced by FUNLAB/POWKONG.
+- `POST /discovery/kol/action` handles per-account feedback. `approve` writes a usable `博主图片帖` reference with `账号/帖子URL`, `视觉参考缩略图`, `样例图片链接`, `图片帖合格性`, and `图片帖合格原因`; `reject_replace` returns the same number of replacement candidates; `hold` and `block_similar` only update the candidate state.
+- Feishu cards that need button callbacks must be sent by the event-hub app (`FEISHU_EVENT_APP_ID`, 聪哥分身3号), not the default `FEISHU_APP_ID` / 聪哥分身1号. The event-hub bot must also be a member of the target group; otherwise Feishu send returns `230002 Bot/User can NOT be out of the chat`. If a KOL card is sent by the wrong app, Feishu shows "该应用尚未配置卡片回调" before the request reaches n8n. Use `scripts/send_kol_visual_card_event_app.py --send` for manual KOL visual-card resend tests.
+- Bitable writeback uses `FEISHU_BITABLE_APP_ID` / `FEISHU_BITABLE_APP_SECRET` first, with `FEISHU_APP_ID` as fallback. KOL card-only fields such as `样例帖子1图片Key` are not written to Base; empty URL fields are omitted before writeback to avoid `URLFieldConvFail`.
+- All discovery and strategy writebacks use the same plan gate: `write_back=true` is blocked unless `SOCIAL_PLAN_WRITEBACK_ENABLED=true`.
+- Base tables:
+  - `账号内容策略表`: `tblyavkR6xdEt9gd`
+  - `参考对象库`: `tblMDwMv07jbeGAE` (`参考类型` includes `博主图片帖`; image-post QA fields: `视觉参考缩略图`, `样例图片链接`, `图片帖合格性`, `图片帖合格原因`)
+  - `周候选池`: `tblV8rGXyRWGsE5r`
+  - `社媒产品索引缓存`: `tblfI565xItYpXhE`
+  - `KOL参考候选池`: `tblAIDN2cMSQVgGR`
 
 Replay:
 - `POST /replay`
@@ -64,6 +105,7 @@ Required environment for production:
 - `SOCIAL_IMAGE_TASK_WRITE_ENABLED`
 - `SOCIAL_IMAGE_RESULT_WRITEBACK_ENABLED`
 - `SOCIAL_ASSET_PREPARE_ENABLED`
+- `SOCIAL_APPROVAL_WRITEBACK_ENABLED`
 - `SOCIAL_PUBLISH_COMMIT_ENABLED`
 - `META_ACCESS_TOKEN`
 - `FEISHU_APP_ID`
@@ -71,6 +113,12 @@ Required environment for production:
 - `FEISHU_BASE_TOKEN`
 - `FEISHU_CONTENT_TABLE_ID`
 - `FEISHU_ACCOUNT_TABLE_ID`
+- `FEISHU_STRATEGY_TABLE_ID`
+- `FEISHU_REFERENCE_TABLE_ID`
+- `FEISHU_WEEKLY_POOL_TABLE_ID`
+- `FEISHU_WEEKLY_REVIEW_TABLE_ID`
+- `FEISHU_PRODUCT_INDEX_TABLE_ID`
+- `FEISHU_KOL_CANDIDATE_TABLE_ID`
 - `FEISHU_LOG_TABLE_ID`
 - `FEISHU_METRICS_TABLE_ID`
 - `FEISHU_IMAGE_TASK_BASE_TOKEN`

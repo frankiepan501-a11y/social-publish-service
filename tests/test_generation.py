@@ -109,6 +109,26 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertIn("Use the attached product reference image", user)
         self.assertIn("Preserve the exact product shape", user)
 
+    def test_build_prompt_includes_seo_geo_and_reference_object(self):
+        _system, user = build_prompt(
+            fields(
+                **{
+                    "参考对象": "8BitDo-style living room post",
+                    "参考理由": "借鉴电视游戏场景",
+                    "借鉴元素": "手持视角、电视背景、低亮度氛围",
+                    "禁止复制元素": "竞品 logo、产品外观、屏幕 UI",
+                    "SEO主关键词": "switch controller for couch gaming",
+                    "GEO目标问题": "What controller should I use for couch gaming?",
+                    "搜索意图": "信息型",
+                    "Hashtag词组池": "#Powkong #GamingController #DeskSetup #CouchGaming #SetupInspo",
+                }
+            )
+        )
+        self.assertIn("switch controller for couch gaming", user)
+        self.assertIn("What controller should I use for couch gaming?", user)
+        self.assertIn("8BitDo-style living room post", user)
+        self.assertIn("Do not copy competitor product appearance", user)
+
     def test_build_prompt_hides_ip_inspired_internal_model_names(self):
         _system, user = build_prompt(
             fields(
@@ -208,6 +228,21 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertIn("no new logo overlay", payload.image_prompt.lower())
         self.assertEqual(validate_generation_payload(payload), [])
 
+    def test_build_update_fields_writes_seo_geo_note(self):
+        source = fields(
+            **{
+                "SEO主关键词": "switch controller setup",
+                "GEO目标问题": "How do I choose a Switch controller?",
+                "Hashtag词组池": "#Powkong #GamingController #DeskSetup #SetupInspo #GameRoom",
+            }
+        )
+        payload = fallback_generation(source)
+        issues = validate_generation_payload(payload, source)
+        self.assertEqual(issues, [])
+        updates = build_update_fields(source, payload, run_id="genv1-test", source="manual")
+        self.assertIn("SEO/GEO生成说明", updates)
+        self.assertIn("SEO/GEO", updates["SEO/GEO生成说明"])
+
     def test_parse_ai_json_normalizes_plain_hashtags(self):
         payload = parse_ai_json(
             """
@@ -271,6 +306,8 @@ class GenerationRulesTest(unittest.TestCase):
                             "AI图片Prompt": "Product-first bright desk setup, no text, no logo, no watermark.",
                             "图片生成模式": "Codex Image",
                             "场景模板": "FB/INS广告图",
+                            "设计参考图": [{"file_token": "design_ref_token", "name": "design.png"}],
+                            "细节参考图": [{"file_token": "detail_ref_token", "name": "buttons.png"}],
                         }
                     )
                 },
@@ -285,7 +322,60 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertEqual(body["task_fields"]["状态"], "待处理")
         self.assertIn("rec_image_source", body["task_fields"]["自定义提示词"])
         self.assertEqual(body["task_fields"]["产品原图"][0]["file_token"], "ref_file_token")
+        self.assertEqual(body["task_fields"]["产品参考图包"][0]["file_token"], "ref_file_token")
+        self.assertEqual(body["task_fields"]["设计参考图"][0]["file_token"], "design_ref_token")
+        self.assertEqual(body["task_fields"]["细节参考图"][0]["file_token"], "detail_ref_token")
+        self.assertEqual(body["task_fields"]["参考图使用策略"], "产品保真优先")
+        self.assertIn("设计参考图 is for scene", body["task_fields"]["自定义提示词"])
+        self.assertIn("细节参考图 overrides", body["task_fields"]["自定义提示词"])
+        self.assertIn("Reference budget", body["task_fields"]["自定义提示词"])
+        self.assertIn("preserve the shown small-control count", body["task_fields"]["自定义提示词"])
         self.assertIn("exact source of truth", body["task_fields"]["自定义提示词"])
+
+    def test_image_task_create_limits_reference_budget(self):
+        client = TestClient(app)
+        resp = client.post(
+            "/image-task/create",
+            json={
+                "record_id": "rec_image_source",
+                "record": {
+                    "fields": fields(
+                        **{
+                            "AI图片Prompt": "Borrow the gaming TV scene only; preserve the FUNLAB controller exactly.",
+                            "图片生成模式": "Codex Image",
+                            "产品参考图": [
+                                {"file_token": "port_token", "name": "04-copy.png"},
+                                {"file_token": "main_token", "name": "image-02-copy.png"},
+                                {"file_token": "angle_token", "name": "01-copy.png"},
+                            ],
+                            "设计参考图": [
+                                {"file_token": "design_one", "name": "competitor-scene.png"},
+                                {"file_token": "design_two", "name": "alternate-scene.png"},
+                            ],
+                            "细节参考图": [
+                                {"file_token": "surface_detail", "name": "surface.png"},
+                                {
+                                    "file_token": "button_detail",
+                                    "name": "FUNLAB_YS11波纹款_AI按键参考_中间功能键特写_图标清晰_v01.png",
+                                },
+                            ],
+                        }
+                    )
+                },
+                "write_task": False,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(len(body["task_fields"]["产品参考图包"]), 1)
+        self.assertEqual(body["task_fields"]["产品参考图包"][0]["file_token"], "main_token")
+        self.assertEqual(body["task_fields"]["产品原图"][0]["file_token"], "main_token")
+        self.assertEqual(len(body["task_fields"]["设计参考图"]), 1)
+        self.assertEqual(body["task_fields"]["设计参考图"][0]["file_token"], "design_one")
+        self.assertEqual(len(body["task_fields"]["细节参考图"]), 1)
+        self.assertEqual(body["task_fields"]["细节参考图"][0]["file_token"], "button_detail")
+        self.assertIn("do not blend unselected product angles", body["task_fields"]["自定义提示词"])
 
     def test_image_task_create_blocks_missing_reference_image(self):
         client = TestClient(app)
@@ -340,6 +430,7 @@ class GenerationRulesTest(unittest.TestCase):
         }
         merged = main_module._merge_product_context_fields(fields(**{"品牌": "FUNLAB", "产品参考图": []}), product_record)
         self.assertEqual(merged["产品库记录ID"], "rec_product_1")
+        self.assertEqual(merged["产品参考图包"][0]["file_token"], "product_ref_token")
         self.assertEqual(merged["产品参考图"][0]["file_token"], "product_ref_token")
         self.assertEqual(merged["产品库IP合规状态"], "合规-无IP")
         self.assertEqual(merged["IP合规状态"], "合规-无IP")
@@ -510,6 +601,38 @@ class GenerationRulesTest(unittest.TestCase):
         fields_out = body["results"][0]["fields"]
         self.assertEqual(fields_out["图片生成状态"], "已生成-待转URL")
         self.assertEqual(fields_out["生成图片file_token"], "filetoken_456")
+
+    def test_image_result_ingest_scan_treats_worker_pending_as_noop(self):
+        client = TestClient(app)
+        resp = client.post(
+            "/image-task/ingest-scan",
+            json={
+                "records": [
+                    {
+                        "record_id": "rec_pending",
+                        "fields": fields(
+                            **{
+                                "图片任务record_id": "rec_worker",
+                                "图片生成状态": "已提交",
+                            }
+                        ),
+                        "image_task_record_id": "rec_worker",
+                        "image_task_record": {"fields": {"状态": "待处理"}},
+                    }
+                ],
+                "write_back": False,
+                "limit": 10,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["selected"], 1)
+        self.assertEqual(body["ingested"], 0)
+        self.assertEqual(body["pending"], 1)
+        self.assertEqual(body["failed"], 0)
+        self.assertEqual(body["results"][0]["record_id"], "rec_pending")
+        self.assertEqual(body["results"][0]["blocking"][0]["code"], "IMAGE_TASK_NOT_DONE:待处理")
 
     def test_image_result_ingest_scan_failed_result_includes_record_id(self):
         client = TestClient(app)
