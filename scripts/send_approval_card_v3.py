@@ -145,13 +145,14 @@ def button(
     original_caption_en: str,
     original_hashtag_en: str,
     primary: bool = False,
+    danger: bool = False,
 ) -> dict:
     return {
         "tag": "button",
         "action_type": "form_submit",
         "name": action_name,
         "text": plain(label),
-        "type": "primary" if primary else "default",
+        "type": "danger" if danger else ("primary" if primary else "default"),
         "value": {
             "action": "fbig_image_feedback",
             "service_action": action,
@@ -214,13 +215,21 @@ def build_card(
                 "placeholder": plain("例如：手握方向按参考图；发光纹路要像嵌入外壳的柔和光线"),
             },
             button(
+                "fbig_approve_schedule",
+                "通过排期",
+                "approve_schedule",
+                record_id,
+                original_caption_en=caption_en,
+                original_hashtag_en=hashtag_en,
+                primary=True,
+            ),
+            button(
                 "fbig_regenerate_image",
                 "重生图片",
                 "regenerate_image",
                 record_id,
                 original_caption_en=caption_en,
                 original_hashtag_en=hashtag_en,
-                primary=True,
             ),
             button(
                 "fbig_regenerate_copy",
@@ -238,6 +247,15 @@ def build_card(
                 original_caption_en=caption_en,
                 original_hashtag_en=hashtag_en,
             ),
+            button(
+                "fbig_reject",
+                "驳回不发",
+                "reject",
+                record_id,
+                original_caption_en=caption_en,
+                original_hashtag_en=hashtag_en,
+                danger=True,
+            ),
         ]
     )
 
@@ -247,7 +265,7 @@ def build_card(
                 [
                     f"**产品**：{product}",
                     f"**记录**：[打开内容卡片]({record_url(record_id)})",
-                    "**测试范围**：v3 图片反馈结构；本卡不会触发发布。",
+                    "**处理边界**：通过排期只写入待发布队列；不会直接发布到 Meta。",
                     "**比对规则**：上方参考图展示设计/竞品参考，用于判断构图、手握方向、氛围和借鉴距离。",
                     "**产品保真**：产品原图不占卡片比对位，系统已作为生图附件绑定，用于约束产品外形、按钮、材质和纹路。",
                     "**品牌硬规则**：FUNLAB 隐藏式发光纹路自动注入，不作为人工问题选项。",
@@ -357,7 +375,13 @@ def main() -> None:
         "design_reference_image_uploaded": bool(design_reference_key),
         "generated_image_uploaded": bool(generated_key),
         "dimension_count": len(IMAGE_FEEDBACK_DIMENSIONS),
-        "button_actions": ["regenerate_image", "regenerate_copy", "regenerate_both"],
+        "button_actions": [
+            "approve_schedule",
+            "regenerate_image",
+            "regenerate_copy",
+            "regenerate_both",
+            "reject",
+        ],
         "render_fix": "form_submit_buttons_are_direct_form_children",
         "display_fix": "show_design_reference_and_whole_post_copy_inputs",
         "copy_input_names": ["caption_en_override", "hashtag_en_override"],

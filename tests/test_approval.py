@@ -1,4 +1,6 @@
 import json
+import importlib.util
+from pathlib import Path
 import unittest
 
 from fastapi.testclient import TestClient
@@ -32,6 +34,17 @@ def approval_record(**overrides):
     }
     fields.update(overrides)
     return {"record_id": "rec_funlab_approval", "fields": fields}
+
+
+def load_approval_card_script():
+    root = Path(__file__).resolve().parents[1]
+    script_path = root / "scripts" / "send_approval_card_v3.py"
+    spec = importlib.util.spec_from_file_location("send_approval_card_v3", script_path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 class ApprovalCallbackTest(unittest.TestCase):
@@ -208,6 +221,43 @@ class ApprovalCallbackTest(unittest.TestCase):
         self.assertEqual(fields["文案修改意见"], "手握方向不对。")
         self.assertNotIn("AI生成状态", fields)
 
+    def test_approve_schedule_marks_record_ready_for_publish_gate(self):
+        resp = self.client.post(
+            "/approval/action",
+            json={
+                "record": approval_record(),
+                "action": "approve_schedule",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data["ok"])
+
+        fields = data["fields"]
+        self.assertEqual(fields["状态"], "待发布")
+        self.assertTrue(fields["审批通过"])
+        self.assertTrue(fields["最终素材确认"])
+        self.assertIn("审批通过时间", fields)
+
+    def test_reject_marks_record_rejected_without_publish_fields(self):
+        resp = self.client.post(
+            "/approval/action",
+            json={
+                "record": approval_record(),
+                "action": "reject",
+                "feedback_text": "产品不准，不发。",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data["ok"])
+
+        fields = data["fields"]
+        self.assertEqual(fields["状态"], "已驳回")
+        self.assertEqual(fields["图片修改意见"], "产品不准，不发。")
+        self.assertNotIn("审批通过", fields)
+        self.assertNotIn("最终素材确认", fields)
+
     def test_writeback_is_blocked_until_explicitly_enabled(self):
         resp = self.client.post(
             "/approval/action",
@@ -224,6 +274,51 @@ class ApprovalCallbackTest(unittest.TestCase):
         self.assertFalse(data["ok"])
         self.assertEqual(data["status"], "blocked")
         self.assertEqual(data["blocking"][0]["code"], "APPROVAL_WRITEBACK_DISABLED")
+
+
+class ApprovalCardV3ScriptTest(unittest.TestCase):
+    def test_card_buttons_cover_all_service_actions_with_stable_payload(self):
+        card_module = load_approval_card_script()
+        card = card_module.build_card(
+            record_id="rec_fbig_card",
+            product="FUNLAB FF01A-04 Controller",
+            caption_en="Keep the product exact.",
+            hashtag_en="#FUNLAB #SwitchController",
+            design_reference_key=None,
+            generated_key=None,
+        )
+
+        form = next(element for element in card["elements"] if element.get("tag") == "form")
+        buttons = [element for element in form["elements"] if element.get("tag") == "button"]
+        service_actions = [button["value"]["service_action"] for button in buttons]
+
+        self.assertEqual(
+            service_actions,
+            [
+                "approve_schedule",
+                "regenerate_image",
+                "regenerate_copy",
+                "regenerate_both",
+                "reject",
+            ],
+        )
+        self.assertEqual(buttons[0]["name"], "fbig_approve_schedule")
+        self.assertEqual(buttons[0]["type"], "primary")
+        self.assertEqual(buttons[-1]["name"], "fbig_reject")
+        self.assertEqual(buttons[-1]["type"], "danger")
+
+        for item in buttons:
+            value = item["value"]
+            self.assertEqual(value["action"], "fbig_image_feedback")
+            self.assertEqual(value["record_id"], "rec_fbig_card")
+            self.assertEqual(value["source"], "approval_card_v3")
+            self.assertEqual(value["card_schema_version"], card_module.CARD_SCHEMA_VERSION)
+            self.assertEqual(value["original_caption_en"], "Keep the product exact.")
+            self.assertEqual(value["original_hashtag_en"], "#FUNLAB #SwitchController")
+
+        serialized = json.dumps(card, ensure_ascii=False)
+        self.assertIn("通过排期只写入待发布队列", serialized)
+        self.assertIn("不会直接发布到 Meta", serialized)
 
 
 if __name__ == "__main__":
