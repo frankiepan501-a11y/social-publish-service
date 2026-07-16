@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
+import json
 import mimetypes
 from typing import Any
 
@@ -9,6 +11,12 @@ import httpx
 
 class FeishuError(RuntimeError):
     pass
+
+
+def _json_response(resp: httpx.Response) -> dict:
+    if not resp.content:
+        return {}
+    return json.loads(resp.content.decode("utf-8"))
 
 
 DATETIME_FIELD_NAMES = {
@@ -143,7 +151,7 @@ class FeishuClient:
                 f"{self._base}/auth/v3/tenant_access_token/internal",
                 json={"app_id": self.app_id, "app_secret": self.app_secret},
             )
-        data = resp.json()
+        data = _json_response(resp)
         if data.get("code") != 0:
             raise FeishuError(f"tenant token error: {data.get('code')} {data.get('msg')}")
         self._token = data["tenant_access_token"]
@@ -153,11 +161,22 @@ class FeishuClient:
         token = await self._tenant_token()
         headers = kwargs.pop("headers", {})
         headers["Authorization"] = f"Bearer {token}"
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.request(method, f"{self._base}{path}", headers=headers, **kwargs)
-        data = resp.json() if resp.content else {}
-        if resp.status_code >= 400 or data.get("code") not in (0, None):
-            raise FeishuError(f"Feishu API error: HTTP {resp.status_code}, code={data.get('code')}, msg={data.get('msg')}")
+        for attempt in range(4):
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.request(method, f"{self._base}{path}", headers=headers, **kwargs)
+            data = _json_response(resp)
+            retryable_data_not_ready = (
+                method.upper() == "GET"
+                and resp.status_code == 400
+                and data.get("code") == 1254607
+                and attempt < 3
+            )
+            if retryable_data_not_ready:
+                await asyncio.sleep(0.8 * (attempt + 1))
+                continue
+            if resp.status_code >= 400 or data.get("code") not in (0, None):
+                raise FeishuError(f"Feishu API error: HTTP {resp.status_code}, code={data.get('code')}, msg={data.get('msg')}")
+            return data
         return data
 
     async def download_media(self, file_token: str) -> tuple[bytes, str]:
@@ -201,7 +220,7 @@ class FeishuClient:
                 },
                 files={"file": (safe_name, content, media_type)},
             )
-        data = resp.json() if resp.content else {}
+        data = _json_response(resp)
         if resp.status_code >= 400 or data.get("code") not in (0, None):
             raise FeishuError(f"Feishu media upload error: HTTP {resp.status_code}, code={data.get('code')}, msg={data.get('msg')}")
         file_token = data.get("data", {}).get("file_token")
@@ -222,7 +241,7 @@ class FeishuClient:
                 data={"image_type": "message"},
                 files={"image": (safe_name, content, media_type)},
             )
-        data = resp.json() if resp.content else {}
+        data = _json_response(resp)
         if resp.status_code >= 400 or data.get("code") not in (0, None):
             raise FeishuError(f"Feishu image upload error: HTTP {resp.status_code}, code={data.get('code')}, msg={data.get('msg')}")
         image_key = data.get("data", {}).get("image_key")
