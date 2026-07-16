@@ -1436,6 +1436,19 @@ def _image_result_ingest_candidate_reason(fields: dict, *, force: bool = False) 
 
 PENDING_IMAGE_TASK_STATUSES = {"empty", "待处理", "已提交", "生成中", "处理中", "pending", "running"}
 FAILED_IMAGE_TASK_STATUSES = {"失败", "处理失败", "failed", "error"}
+SUCCESS_IMAGE_TASK_STATUSES = {"处理成功", "已完成", "success"}
+
+
+def _normalize_image_task_status(status: str) -> str:
+    if status in PENDING_IMAGE_TASK_STATUSES or status in FAILED_IMAGE_TASK_STATUSES or status in SUCCESS_IMAGE_TASK_STATUSES:
+        return status
+    try:
+        repaired = status.encode("cp949").decode("gbk")
+    except UnicodeError:
+        return status
+    if repaired in PENDING_IMAGE_TASK_STATUSES or repaired in FAILED_IMAGE_TASK_STATUSES or repaired in SUCCESS_IMAGE_TASK_STATUSES:
+        return repaired
+    return status
 
 
 def _is_pending_image_result(item: dict) -> bool:
@@ -1459,7 +1472,7 @@ def _is_pending_image_result(item: dict) -> bool:
 
 
 def _extract_image_result_fields(image_task_record_id: str, image_task_fields: dict) -> tuple[dict, list[str]]:
-    status = select_value(image_task_fields.get("状态"))
+    status = _normalize_image_task_status(select_value(image_task_fields.get("状态")))
     file_token = text_value(image_task_fields.get("生成图片file_token"))
     public_url = text_value(image_task_fields.get("public_asset_url")) or text_value(image_task_fields.get("生成图片URL"))
     location = text_value(image_task_fields.get("生成图片位置"))
@@ -1473,7 +1486,7 @@ def _extract_image_result_fields(image_task_record_id: str, image_task_fields: d
         return updates, []
 
     blocking = []
-    if status not in {"处理成功", "已完成", "success"}:
+    if status not in SUCCESS_IMAGE_TASK_STATUSES:
         blocking.append(f"IMAGE_TASK_NOT_DONE:{status or 'empty'}")
     if not (file_token or public_url or location):
         blocking.append("IMAGE_RESULT_MISSING")

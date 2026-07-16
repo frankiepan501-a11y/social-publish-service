@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.config import Settings
 import app.main as main_module
-from app.main import _copy_product_references_to_image_base
+from app.main import _copy_product_references_to_image_base, _extract_image_result_fields
 from app.models import ImageTaskRequest
 
 
@@ -119,3 +119,13 @@ class ImageTaskReferenceCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("图片生成模式", update_fields)
         self.assertEqual(update_fields["图片生成状态"], "已提交")
         self.assertEqual(update_fields["图片任务record_id"], "rec_worker")
+
+    async def test_image_task_pending_status_repairs_known_mojibake(self):
+        _updates, blocking = _extract_image_result_fields(
+            "rec_worker",
+            {
+                "状态": "덤뇹잿",
+            },
+        )
+
+        self.assertEqual(blocking, ["IMAGE_TASK_NOT_DONE:待处理", "IMAGE_RESULT_MISSING"])
