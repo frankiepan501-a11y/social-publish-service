@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 
 
@@ -34,6 +36,25 @@ class MetaClient:
     async def content_publishing_limit(self, ig_user_id: str) -> dict:
         return await self._request("GET", f"{ig_user_id}/content_publishing_limit")
 
+    async def _wait_for_instagram_container(self, creation_id: str) -> dict:
+        last_payload: dict = {}
+        for attempt in range(1, 11):
+            payload = await self._request("GET", creation_id, params={"fields": "id,status_code,status"})
+            last_payload = payload
+            status_code = str(payload.get("status_code") or "").upper()
+            if status_code in {"FINISHED", "PUBLISHED"}:
+                return payload
+            if status_code == "ERROR":
+                raise MetaApiError(
+                    str(payload.get("status") or "Instagram media container processing failed"),
+                    "IG_CONTAINER_ERROR",
+                )
+            await asyncio.sleep(min(3 * attempt, 15))
+        raise MetaApiError(
+            f"Instagram media container was not ready for publish: {last_payload}",
+            "IG_CONTAINER_NOT_READY",
+        )
+
     async def publish_instagram_image(self, ig_user_id: str, image_url: str, caption: str) -> dict:
         container = await self._request(
             "POST",
@@ -41,6 +62,7 @@ class MetaClient:
             data={"image_url": image_url, "caption": caption},
         )
         creation_id = container["id"]
+        await self._wait_for_instagram_container(creation_id)
         published = await self._request("POST", f"{ig_user_id}/media_publish", data={"creation_id": creation_id})
         media_id = published["id"]
         media = await self._request("GET", media_id, params={"fields": "id,permalink,media_type,timestamp"})
@@ -55,12 +77,15 @@ class MetaClient:
                 data={"image_url": image_url, "is_carousel_item": "true"},
             )
             child_ids.append(child["id"])
+        for child_id in child_ids:
+            await self._wait_for_instagram_container(child_id)
         container = await self._request(
             "POST",
             f"{ig_user_id}/media",
             data={"media_type": "CAROUSEL", "children": ",".join(child_ids), "caption": caption},
         )
         creation_id = container["id"]
+        await self._wait_for_instagram_container(creation_id)
         published = await self._request("POST", f"{ig_user_id}/media_publish", data={"creation_id": creation_id})
         media_id = published["id"]
         media = await self._request("GET", media_id, params={"fields": "id,permalink,media_type,timestamp"})
