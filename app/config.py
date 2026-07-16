@@ -13,6 +13,8 @@ def env_bool(name: str, default: bool = False) -> bool:
 class Settings:
     graph_version: str = os.getenv("META_GRAPH_VERSION", "v25.0")
     meta_access_token: str = os.getenv("META_ACCESS_TOKEN", "")
+    meta_access_token_powkong: str = os.getenv("META_ACCESS_TOKEN_POWKONG", "")
+    meta_access_token_funlab: str = os.getenv("META_ACCESS_TOKEN_FUNLAB", "")
     service_token: str = os.getenv("SOCIAL_PUBLISH_API_TOKEN", "")
     commit_enabled: bool = env_bool("SOCIAL_PUBLISH_COMMIT_ENABLED", False)
     generation_writeback_enabled: bool = env_bool("SOCIAL_GENERATION_WRITEBACK_ENABLED", False)
@@ -57,7 +59,15 @@ class Settings:
         )
 
     def meta_enabled(self) -> bool:
-        return bool(self.meta_access_token)
+        return bool(self.meta_access_token or self.meta_access_token_powkong or self.meta_access_token_funlab)
+
+    def meta_token_for_brand(self, brand: str | None) -> str:
+        normalized = (brand or "").strip().lower()
+        if normalized == "powkong" and self.meta_access_token_powkong:
+            return self.meta_access_token_powkong
+        if normalized == "funlab" and self.meta_access_token_funlab:
+            return self.meta_access_token_funlab
+        return self.meta_access_token
 
     def generation_ai_enabled(self) -> bool:
         return self.generation_ai_provider != "template" and bool(self.generation_ai_api_key)

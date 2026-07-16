@@ -1845,14 +1845,15 @@ async def _prepare_asset_urls_for_commit(
         return asset_urls, None
     if not settings.asset_prepare_enabled:
         return [], {"code": "ASSET_PREPARE_DISABLED", "message": "SOCIAL_ASSET_PREPARE_ENABLED=false"}
-    if not settings.meta_enabled():
+    meta_access_token = settings.meta_token_for_brand(account.brand)
+    if not meta_access_token:
         return [], {"code": "META_TOKEN_MISSING", "message": "META_ACCESS_TOKEN is required to prepare asset URLs"}
     if not account.meta_page_id:
         return [], {"code": "META_PAGE_ID_MISSING", "message": "Meta Page ID is required to stage images"}
     feishu = _feishu(settings)
     if feishu is None:
         return [], {"code": "FEISHU_NOT_CONFIGURED", "message": "FEISHU_* env is required to download image file_token"}
-    meta = MetaClient(settings.meta_access_token, settings.graph_version)
+    meta = MetaClient(meta_access_token, settings.graph_version)
     prepared_urls = []
     staged_photo_ids = []
     for index, file_token in enumerate(file_tokens):
@@ -1905,10 +1906,11 @@ async def _execute_publish(req: PublishRequest, *, commit: bool, settings: Setti
     now = _parse_now(req.now)
     run_id = f"spv1-{uuid.uuid4().hex[:16]}"
     ig_limit = None
+    meta_access_token = settings.meta_token_for_brand(account.brand) if account else ""
 
-    if account and account.platform == PLATFORM_INSTAGRAM and settings.meta_enabled():
+    if account and account.platform == PLATFORM_INSTAGRAM and meta_access_token:
         try:
-            ig_limit = await MetaClient(settings.meta_access_token, settings.graph_version).content_publishing_limit(
+            ig_limit = await MetaClient(meta_access_token, settings.graph_version).content_publishing_limit(
                 account.ig_user_id
             )
         except MetaApiError as exc:
@@ -1953,7 +1955,7 @@ async def _execute_publish(req: PublishRequest, *, commit: bool, settings: Setti
             mode="commit",
         )
         return {"ok": False, "status": "blocked", "run_id": run_id, "blocking": [{"code": "COMMIT_DISABLED"}]}
-    if not settings.meta_enabled():
+    if not meta_access_token:
         return {"ok": False, "status": "blocked", "run_id": run_id, "blocking": [{"code": "META_TOKEN_MISSING"}]}
 
     assert account is not None
@@ -1984,7 +1986,7 @@ async def _execute_publish(req: PublishRequest, *, commit: bool, settings: Setti
             "run_id": run_id,
             "blocking": [prepare_error],
         }
-    meta = MetaClient(settings.meta_access_token, settings.graph_version)
+    meta = MetaClient(meta_access_token, settings.graph_version)
     try:
         if account.platform == PLATFORM_INSTAGRAM:
             if validation.normalized["material_type"] == "carousel":
@@ -2774,7 +2776,11 @@ async def insights_poll(
     fields = record.get("fields", record)
     media_id = str(fields.get("IG Media ID", "")).strip()
     post_id = str(fields.get("Meta Page Post ID", "")).strip()
-    meta = MetaClient(settings.meta_access_token, settings.graph_version)
+    brand = select_value(fields.get("品牌")) or text_value(fields.get("品牌"))
+    meta_access_token = settings.meta_token_for_brand(brand)
+    if not meta_access_token:
+        return {"ok": False, "status": "blocked", "reason": "META_TOKEN_MISSING"}
+    meta = MetaClient(meta_access_token, settings.graph_version)
     if media_id:
         data = await meta.ig_media_insights(media_id)
     elif post_id:

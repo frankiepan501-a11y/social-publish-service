@@ -118,11 +118,11 @@ class MetaClient:
             data={"url": image_url, "caption": caption, "published": "true"},
         )
         photo_id = photo["id"]
-        fields = await self._request("GET", photo_id, params={"fields": "id,link,permalink_url"})
+        fields = await self._request("GET", photo_id, params={"fields": "id,link"})
         return {
             "photo_id": photo_id,
             "post_id": photo.get("post_id", ""),
-            "permalink": fields.get("permalink_url") or fields.get("link", ""),
+            "permalink": fields.get("link", ""),
             "raw": fields,
         }
 

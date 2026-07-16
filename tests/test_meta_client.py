@@ -87,7 +87,8 @@ class MetaClientTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["photo_id"], "photo-1")
         self.assertEqual(result["post_id"], "")
-        self.assertEqual(client.calls[1][2]["params"]["fields"], "id,link,permalink_url")
+        self.assertEqual(result["permalink"], "https://facebook.example/photo.php?fbid=photo-1")
+        self.assertEqual(client.calls[1][2]["params"]["fields"], "id,link")
 
 
 if __name__ == "__main__":
