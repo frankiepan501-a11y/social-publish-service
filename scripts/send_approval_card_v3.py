@@ -305,7 +305,7 @@ def build_card(
         "config": {"wide_screen_mode": True, "enable_forward": False},
         "header": {
             "template": "yellow",
-            "title": {"tag": "plain_text", "content": "🟡 [SEO·P2] FB/IG 素材返修测试 · 设计参考图版 · FUNLAB FF01A-04"},
+            "title": {"tag": "plain_text", "content": f"🟡 [SEO·P2] FB/IG 素材审批 · {product}"},
         },
         "elements": elements,
     }
@@ -324,6 +324,19 @@ def send_card(token: str, union_id: str, card: dict) -> dict:
     )
 
 
+def send_card_to(token: str, receive_id: str, receive_id_type: str, card: dict) -> dict:
+    return _json_request(
+        "POST",
+        f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_id_type}",
+        {
+            "receive_id": receive_id,
+            "msg_type": "interactive",
+            "content": json.dumps(card, ensure_ascii=False),
+        },
+        token=token,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--record-id", default=DEFAULT_RECORD_ID)
@@ -333,6 +346,8 @@ def main() -> None:
     parser.add_argument("--design-reference-image", "--reference-image", default=DEFAULT_DESIGN_REFERENCE_IMAGE)
     parser.add_argument("--generated-image", default=DEFAULT_GENERATED_IMAGE)
     parser.add_argument("--union-id", default=FRANKIE_UNION_ID)
+    parser.add_argument("--receive-id", default="")
+    parser.add_argument("--receive-id-type", default="union_id", choices=["union_id", "open_id", "chat_id"])
     parser.add_argument("--out", default=DEFAULT_OUT)
     parser.add_argument("--send", action="store_true")
     args = parser.parse_args()
@@ -342,8 +357,14 @@ def main() -> None:
     generated_key = None
     if args.send:
         token = tenant_token()
-        design_reference_key = upload_image(token, Path(args.design_reference_image))
-        generated_key = upload_image(token, Path(args.generated_image))
+        if args.design_reference_image:
+            design_path = Path(args.design_reference_image)
+            if design_path.is_file():
+                design_reference_key = upload_image(token, design_path)
+        if args.generated_image:
+            generated_path = Path(args.generated_image)
+            if generated_path.is_file():
+                generated_key = upload_image(token, generated_path)
 
     card = build_card(
         record_id=args.record_id,
@@ -356,7 +377,8 @@ def main() -> None:
     result = {"code": None, "msg": "preview only"}
     if args.send:
         assert token is not None
-        result = send_card(token, args.union_id, card)
+        receive_id = args.receive_id or args.union_id
+        result = send_card_to(token, receive_id, args.receive_id_type, card)
         if result.get("code") != 0:
             raise RuntimeError(f"send card failed: {result}")
 
@@ -374,6 +396,7 @@ def main() -> None:
         "design_reference_image": str(Path(args.design_reference_image)),
         "design_reference_image_uploaded": bool(design_reference_key),
         "generated_image_uploaded": bool(generated_key),
+        "receive_id_type": args.receive_id_type,
         "dimension_count": len(IMAGE_FEEDBACK_DIMENSIONS),
         "button_actions": [
             "approve_schedule",
