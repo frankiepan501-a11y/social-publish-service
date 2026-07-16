@@ -100,6 +100,12 @@ Replay:
 - Generation replay is dry-run only. It cannot approve, confirm assets, publish, or write fields back.
 
 Operational fixes:
+- 2026-07-16 FB/IG image-task product-reference copy:
+  - Problem: the four-account P2 validation reached generated content, but `/image-task/create {"write_task":true}` returned HTTP 500 for records that used product-library reference attachments.
+  - Root cause: product-library attachment objects include a `url` with `bitablePerm` context. The image-task bridge copied attachments by calling the generic `/drive/v1/medias/{file_token}/download` path only, which can fail when the service app needs the attachment-scoped download URL. A second compatibility issue was that the content-calendar writeback included `图片生成模式`, which may not exist in the production content table.
+  - Fix: `FeishuClient.download_media_url()` downloads attachment URLs with the tenant token, and `_copy_product_references_to_image_base()` uses attachment `url` first with file-token download as fallback. After creating the worker record, the content-calendar update now writes only `图片生成状态`, `图片任务record_id`, and `运行/回放ID`.
+  - Verification: targeted local tests passed: `tests.test_image_task` and the image-task generation tests for dry-run payloads, reference budget, missing-reference blocking, write-gate blocking, and scan selection.
+  - Follow-up: after Zeabur deploy, rerun `/image-task/create` for the four P2 content records and continue worker ingest, approval-card, and publish dry-run validation.
 - 2026-07-16 Powkong Meta/IG production canary:
   - Problem: the safe-chain canary could pass dry-run but fail real Meta commit. Initial attempts exposed three production-only issues: Feishu `file_token` media download returned 403 from the service app, the Powkong Page ID used by the manual canary payload was stale, Instagram `media_publish` could return transient `9007 Media ID is not available`, and Facebook photo lookup rejected the removed `post_id` field.
   - Root cause: publish commit relied on a Feishu-hosted asset path not readable by this service identity, the canary payload did not use the `/me/accounts` Page ID, Instagram container readiness needed a second publish-level retry loop, and the Facebook Graph API no longer accepts `post_id` in the photo fields lookup.

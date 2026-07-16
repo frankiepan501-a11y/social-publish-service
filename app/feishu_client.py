@@ -173,6 +173,16 @@ class FeishuClient:
         content_type = resp.headers.get("content-type", "image/png").split(";")[0].strip() or "image/png"
         return resp.content, content_type
 
+    async def download_media_url(self, url: str) -> tuple[bytes, str]:
+        token = await self._tenant_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            resp = await client.get(url, headers=headers)
+        if resp.status_code >= 400:
+            raise FeishuError(f"Feishu media download URL error: HTTP {resp.status_code}")
+        content_type = resp.headers.get("content-type", "image/png").split(";")[0].strip() or "image/png"
+        return resp.content, content_type
+
     async def upload_bitable_media(self, *, file_name: str, content: bytes, content_type: str = "image/png") -> str:
         token = await self._tenant_token()
         headers = {"Authorization": f"Bearer {token}"}

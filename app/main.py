@@ -1378,7 +1378,11 @@ async def _copy_product_references_to_image_base(
             if not file_token:
                 continue
             if file_token not in copied_by_source_token:
-                content, content_type = await content_client.download_media(file_token)
+                download_url = text_value(ref.get("url"))
+                if download_url:
+                    content, content_type = await content_client.download_media_url(download_url)
+                else:
+                    content, content_type = await content_client.download_media(file_token)
                 file_name = _reference_file_name(ref, index, content_type)
                 copied_token = await image_client.upload_bitable_media(
                     file_name=file_name,
@@ -1561,7 +1565,6 @@ async def _execute_image_task(req: ImageTaskRequest, settings: Settings) -> dict
             settings.content_table_id,
             record_id,
             {
-                "图片生成模式": "Codex Image",
                 "图片生成状态": "已提交",
                 "图片任务record_id": image_task_record_id,
                 "运行/回放ID": run_id,
