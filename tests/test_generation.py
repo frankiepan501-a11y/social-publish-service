@@ -488,6 +488,71 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertEqual(body["fields"]["图片生成状态"], "已生成-待转URL")
         self.assertEqual(body["fields"]["生成图片file_token"], "filetoken_123")
 
+    def test_image_result_ingest_omits_non_url_location_from_image_link(self):
+        client = TestClient(app)
+        resp = client.post(
+            "/image-task/ingest",
+            json={
+                "record_id": "rec_image_source",
+                "record": {"fields": fields(**{"图片任务record_id": "rec_worker"})},
+                "image_task_record_id": "rec_worker",
+                "image_task_record": {
+                    "fields": {
+                        "状态": "处理成功",
+                        "生成图片位置": "canary fallback: reused product reference image",
+                        "生成图片file_token": "filetoken_123",
+                    }
+                },
+                "write_back": False,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["fields"]["图片生成状态"], "已生成-待转URL")
+        self.assertEqual(body["fields"]["生成图片file_token"], "filetoken_123")
+        self.assertNotIn("AI生成图链接", body["fields"])
+
+    def test_image_result_ingest_writeback_retries_without_optional_run_id(self):
+        class FakeClient:
+            def __init__(self):
+                self.updates = []
+
+            async def update_record(self, table_id, record_id, update_fields):
+                self.updates.append(update_fields)
+                if "运行/回放ID" in update_fields:
+                    raise main_module.FeishuError("Feishu API error: HTTP 400, code=1254045, msg=field 运行/回放ID not found")
+                return {"record": {"record_id": record_id}}
+
+            async def append_run_log(self, *args, **kwargs):
+                return None
+
+        fake = FakeClient()
+        settings = Settings(
+            feishu_app_id="app",
+            feishu_app_secret="secret",
+            image_result_writeback_enabled=True,
+            dry_run_write_logs=False,
+        )
+        req = main_module.ImageResultIngestRequest(
+            record_id="rec_image_source",
+            record={"fields": fields(**{"图片任务record_id": "rec_worker"})},
+            image_task_record_id="rec_worker",
+            image_task_record={
+                "fields": {
+                    "状态": "处理成功",
+                    "生成图片file_token": "filetoken_123",
+                }
+            },
+            write_back=True,
+        )
+        with patch.object(main_module, "_feishu", return_value=fake):
+            result = asyncio.run(main_module._execute_image_result_ingest(req, settings=settings))
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(fake.updates), 2)
+        self.assertIn("运行/回放ID", fake.updates[0])
+        self.assertNotIn("运行/回放ID", fake.updates[1])
+
     def test_image_task_scan_selects_only_pending_codex_image_candidates(self):
         client = TestClient(app)
         resp = client.post(

@@ -1439,6 +1439,10 @@ FAILED_IMAGE_TASK_STATUSES = {"失败", "处理失败", "failed", "error"}
 SUCCESS_IMAGE_TASK_STATUSES = {"处理成功", "已完成", "success"}
 
 
+def _is_http_url(value: str) -> bool:
+    return value.strip().lower().startswith(("http://", "https://"))
+
+
 def _normalize_image_task_status(status: str) -> str:
     if status in PENDING_IMAGE_TASK_STATUSES or status in FAILED_IMAGE_TASK_STATUSES or status in SUCCESS_IMAGE_TASK_STATUSES:
         return status
@@ -1496,10 +1500,11 @@ def _extract_image_result_fields(image_task_record_id: str, image_task_fields: d
         image_status = "已生成-待转URL"
     if public_url:
         image_status = "已转发布URL"
+    image_link = public_url or (location if _is_http_url(location) else "")
     updates = {
         "图片任务record_id": image_task_record_id,
         "图片生成状态": image_status,
-        "AI生成图链接": public_url or location,
+        "AI生成图链接": image_link,
         "生成图片file_token": file_token,
         "图片生成错误": "",
     }
@@ -1813,6 +1818,22 @@ async def _execute_image_result_ingest(req: ImageResultIngestRequest, settings: 
             raise HTTPException(status_code=400, detail="write_back requires a persisted record_id")
         try:
             await client.update_record(settings.content_table_id, record_id, updates | {"运行/回放ID": run_id})
+        except FeishuError as exc:
+            if "1254045" in str(exc) and "运行/回放ID" in str(exc):
+                await client.update_record(settings.content_table_id, record_id, updates)
+            else:
+                await _write_log(
+                    settings,
+                    run_id=run_id,
+                    record_id=record_id,
+                    node="image-task/ingest",
+                    status="error",
+                    input_hash=result_hash,
+                    output_summary=output_summary,
+                    decision_reason=f"image-result-writeback-failed:{type(exc).__name__}",
+                    mode=mode,
+                )
+                raise
         except Exception as exc:
             await _write_log(
                 settings,
