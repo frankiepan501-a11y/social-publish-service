@@ -63,7 +63,7 @@ class MetaClient:
         )
         creation_id = container["id"]
         await self._wait_for_instagram_container(creation_id)
-        published = await self._request("POST", f"{ig_user_id}/media_publish", data={"creation_id": creation_id})
+        published = await self._publish_instagram_container(ig_user_id, creation_id)
         media_id = published["id"]
         media = await self._request("GET", media_id, params={"fields": "id,permalink,media_type,timestamp"})
         return {"creation_id": creation_id, "media_id": media_id, "permalink": media.get("permalink", ""), "raw": media}
@@ -86,7 +86,7 @@ class MetaClient:
         )
         creation_id = container["id"]
         await self._wait_for_instagram_container(creation_id)
-        published = await self._request("POST", f"{ig_user_id}/media_publish", data={"creation_id": creation_id})
+        published = await self._publish_instagram_container(ig_user_id, creation_id)
         media_id = published["id"]
         media = await self._request("GET", media_id, params={"fields": "id,permalink,media_type,timestamp"})
         return {
@@ -97,6 +97,20 @@ class MetaClient:
             "raw": media,
         }
 
+    async def _publish_instagram_container(self, ig_user_id: str, creation_id: str) -> dict:
+        last_error: MetaApiError | None = None
+        for attempt in range(1, 7):
+            try:
+                return await self._request("POST", f"{ig_user_id}/media_publish", data={"creation_id": creation_id})
+            except MetaApiError as exc:
+                if exc.code != "9007":
+                    raise
+                last_error = exc
+                await asyncio.sleep(min(10 * attempt, 45))
+                await self._wait_for_instagram_container(creation_id)
+        assert last_error is not None
+        raise last_error
+
     async def publish_facebook_photo(self, page_id: str, image_url: str, caption: str) -> dict:
         photo = await self._request(
             "POST",
@@ -104,10 +118,10 @@ class MetaClient:
             data={"url": image_url, "caption": caption, "published": "true"},
         )
         photo_id = photo["id"]
-        fields = await self._request("GET", photo_id, params={"fields": "id,post_id,link,permalink_url"})
+        fields = await self._request("GET", photo_id, params={"fields": "id,link,permalink_url"})
         return {
             "photo_id": photo_id,
-            "post_id": fields.get("post_id", ""),
+            "post_id": photo.get("post_id", ""),
             "permalink": fields.get("permalink_url") or fields.get("link", ""),
             "raw": fields,
         }

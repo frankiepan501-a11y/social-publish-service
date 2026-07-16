@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from app.meta_client import MetaApiError, MetaClient
 
@@ -52,6 +53,41 @@ class MetaClientTest(unittest.IsolatedAsyncioTestCase):
             await client.publish_instagram_image("ig-1", "https://example.com/image.jpg", "caption")
 
         self.assertEqual(ctx.exception.code, "IG_CONTAINER_ERROR")
+
+    async def test_instagram_publish_retries_transient_media_unavailable(self):
+        client = FakeMetaClient(
+            [
+                {"id": "creation-1"},
+                {"id": "creation-1", "status_code": "FINISHED"},
+                MetaApiError("Media ID is not available", "9007"),
+                {"id": "creation-1", "status_code": "FINISHED"},
+                {"id": "media-1"},
+                {"id": "media-1", "permalink": "https://instagram.example/p/1"},
+            ]
+        )
+
+        with patch("app.meta_client.asyncio.sleep", new=AsyncMock()):
+            result = await client.publish_instagram_image("ig-1", "https://example.com/image.jpg", "caption")
+
+        self.assertEqual(result["media_id"], "media-1")
+        self.assertEqual(
+            [call[1] for call in client.calls],
+            ["ig-1/media", "creation-1", "ig-1/media_publish", "creation-1", "ig-1/media_publish", "media-1"],
+        )
+
+    async def test_facebook_photo_lookup_avoids_removed_post_id_field(self):
+        client = FakeMetaClient(
+            [
+                {"id": "photo-1"},
+                {"id": "photo-1", "link": "https://facebook.example/photo.php?fbid=photo-1"},
+            ]
+        )
+
+        result = await client.publish_facebook_photo("page-1", "https://example.com/image.jpg", "caption")
+
+        self.assertEqual(result["photo_id"], "photo-1")
+        self.assertEqual(result["post_id"], "")
+        self.assertEqual(client.calls[1][2]["params"]["fields"], "id,link,permalink_url")
 
 
 if __name__ == "__main__":
