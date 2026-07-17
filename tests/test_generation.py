@@ -420,6 +420,26 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertFalse(body["ok"])
         self.assertIn("FUNLAB_IP_COMPLIANCE_BLOCKED:禁售-高风险", body["missing"])
 
+    def test_image_task_create_blocks_approved_publish_ready_content(self):
+        client = TestClient(app)
+        source = fields(
+            **{
+                "状态": "待发布",
+                "审批通过": True,
+                "最终素材确认": True,
+                "AI图片Prompt": "Product-first bright desk setup, no text, no logo, no watermark.",
+                "图片生成模式": "Codex Image",
+            }
+        )
+        resp = client.post(
+            "/image-task/create",
+            json={"record_id": "rec_publish_ready", "record": {"fields": source}, "write_task": False, "force": True},
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["ok"])
+        self.assertIn("approved/publish-ready content requires approval regeneration action", body["missing"])
+
     def test_product_context_merge_adds_reference_image_and_ip_fields(self):
         product_record = {
             "record_id": "rec_product_1",
@@ -487,6 +507,29 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertEqual(body["fields"]["图片生成状态"], "已生成-待转URL")
         self.assertEqual(body["fields"]["生成图片file_token"], "filetoken_123")
+
+    def test_image_result_ingest_blocks_result_equal_to_source_reference(self):
+        client = TestClient(app)
+        resp = client.post(
+            "/image-task/ingest",
+            json={
+                "record_id": "rec_image_source",
+                "record": {"fields": fields(**{"图片任务record_id": "rec_worker"})},
+                "image_task_record_id": "rec_worker",
+                "image_task_record": {
+                    "fields": {
+                        "状态": "处理成功",
+                        "产品参考图包": [{"file_token": "source_token"}],
+                        "生成图片file_token": "source_token",
+                    }
+                },
+                "write_back": False,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["ok"])
+        self.assertIn("IMAGE_RESULT_EQUALS_SOURCE_REFERENCE", [item["code"] for item in body["blocking"]])
 
     def test_image_result_ingest_omits_non_url_location_from_image_link(self):
         client = TestClient(app)

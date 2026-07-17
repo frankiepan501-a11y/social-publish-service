@@ -14,6 +14,7 @@ from .config import Settings, get_settings
 from .discovery import (
     DEFAULT_ACCOUNT_SLOTS,
     apply_kol_action,
+    apply_reference_action,
     build_kol_feishu_cards,
     build_kol_candidates,
     build_kol_review_cards,
@@ -51,6 +52,7 @@ from .models import (
     KolVisualPostDiscoveryRequest,
     KolWeeklyDiscoveryRequest,
     ProductIndexSyncRequest,
+    ReferenceActionRequest,
     ReferenceWeeklyDiscoveryRequest,
     WeeklyInputActionRequest,
     WeeklyInputCardRequest,
@@ -71,6 +73,7 @@ from .rules import (
     PLATFORM_FACEBOOK,
     PLATFORM_INSTAGRAM,
     collect_single_asset_file_tokens,
+    parse_file_tokens,
     validate_publish,
     bool_value,
     normalize_fields,
@@ -1015,6 +1018,66 @@ async def _execute_kol_action(req: KolActionRequest, settings: Settings) -> dict
     }
 
 
+async def _execute_reference_action(req: ReferenceActionRequest, settings: Settings) -> dict:
+    run_id = "refactionv1-" + uuid.uuid4().hex[:16]
+    if req.write_back:
+        blocked = _plan_gate_blocked(settings, run_id, "discovery_reference_action", req.candidate_record_id or "reference")
+        if blocked:
+            return blocked
+        if not settings.kol_candidate_table_id:
+            raise HTTPException(status_code=503, detail="Feishu reference candidate table is not configured")
+    candidate_id, candidate = await _load_kol_candidate(req, settings)
+    strategies = await _load_strategy_records(req.strategies, settings)
+    existing = await _load_kol_candidates(req.existing_candidates, settings)
+    action_result = apply_reference_action(
+        candidate,
+        action=req.action,
+        strategies=strategies,
+        visual_posts=req.visual_posts,
+        existing_candidates=existing,
+        replacement_count=req.replacement_count,
+        min_score=req.min_score,
+        week_start=req.week_start,
+        now=req.now,
+    )
+    candidate_update = None
+    reference_record = None
+    replacement_records: list[dict] = []
+    if req.write_back:
+        client = _feishu(settings)
+        if client is None:
+            raise HTTPException(status_code=503, detail="Feishu env is not configured")
+        if candidate_id != "inline-kol-candidate":
+            candidate_update = await client.update_record(settings.kol_candidate_table_id, candidate_id, action_result["updates"])
+        if action_result.get("reference_fields"):
+            reference_record = await client.create_record(settings.reference_table_id, action_result["reference_fields"])
+        for replacement in action_result.get("replacements", []):
+            replacement_records.append(await client.create_record(settings.kol_candidate_table_id, replacement))
+    await _write_log(
+        settings,
+        run_id=run_id,
+        record_id=candidate_id,
+        node="discovery_reference_action",
+        status="success",
+        input_hash=discovery_input_hash({"candidate_id": candidate_id, "action": req.action}),
+        output_summary=f"action={req.action}, replacements={len(action_result.get('replacements', []))}, reference={bool(action_result.get('reference_fields'))}",
+        decision_reason=req.action,
+        mode="commit" if req.write_back else "dry-run",
+    )
+    return {
+        "ok": True,
+        "status": "reference-action-written" if req.write_back else "reference-action-dry-run",
+        "run_id": run_id,
+        "candidate_record_id": candidate_id,
+        "fields": action_result["updates"],
+        "reference_fields": action_result.get("reference_fields"),
+        "replacements": action_result.get("replacements", []),
+        "candidate_update": candidate_update,
+        "reference_record": reference_record,
+        "replacement_records": replacement_records,
+    }
+
+
 async def _execute_plan_weekly(req: PlanWeeklyRequest, settings: Settings) -> dict:
     run_id = "planweeklyv1-" + uuid.uuid4().hex[:16]
     if req.write_back and not settings.plan_writeback_enabled:
@@ -1239,6 +1302,7 @@ def _image_ratio_for_content(fields: dict) -> str:
 def _build_image_task_fields(record_id: str, fields: dict) -> tuple[dict, list[str], str]:
     product = text_value(fields.get("产品名")) or text_value(fields.get("内容标题"))
     brand = select_value(fields.get("品牌"))
+    status = select_value(fields.get("状态"))
     task_brand = "Funlab" if brand.upper() == "FUNLAB" else brand
     image_prompt = text_value(fields.get("AI图片Prompt"))
     mode = select_value(fields.get("图片生成模式")) or "Codex Image"
@@ -1267,6 +1331,12 @@ def _build_image_task_fields(record_id: str, fields: dict) -> tuple[dict, list[s
         missing.append(ip_issue)
     if text_value(fields.get("图片任务record_id")) and not bool(fields.get("_force_image_task")):
         missing.append("图片任务record_id already exists")
+    if (
+        bool_value(fields.get("审批通过"))
+        or bool_value(fields.get("最终素材确认"))
+        or status in {"待发布", "发布中", "已发布"}
+    ) and not bool_value(fields.get("_approval_regeneration_image_task")):
+        missing.append("approved/publish-ready content requires approval regeneration action")
 
     custom_prompt = "\n".join(
         [
@@ -1475,6 +1545,13 @@ def _is_pending_image_result(item: dict) -> bool:
     return has_missing_result and all(status in PENDING_IMAGE_TASK_STATUSES for status in statuses)
 
 
+def _image_task_source_file_tokens(image_task_fields: dict) -> set[str]:
+    tokens: set[str] = set()
+    for field_name in ("产品原图", "产品参考图包", "设计参考图", "细节参考图"):
+        tokens.update(parse_file_tokens(image_task_fields.get(field_name)))
+    return {token for token in tokens if token}
+
+
 def _extract_image_result_fields(image_task_record_id: str, image_task_fields: dict) -> tuple[dict, list[str]]:
     status = _normalize_image_task_status(select_value(image_task_fields.get("状态")))
     file_token = text_value(image_task_fields.get("生成图片file_token"))
@@ -1494,6 +1571,8 @@ def _extract_image_result_fields(image_task_record_id: str, image_task_fields: d
         blocking.append(f"IMAGE_TASK_NOT_DONE:{status or 'empty'}")
     if not (file_token or public_url or location):
         blocking.append("IMAGE_RESULT_MISSING")
+    if file_token and file_token in _image_task_source_file_tokens(image_task_fields):
+        blocking.append("IMAGE_RESULT_EQUALS_SOURCE_REFERENCE")
 
     image_status = "已生成"
     if file_token and not public_url:
@@ -2487,6 +2566,7 @@ async def _execute_approval_action(req: ApprovalActionRequest, settings: Setting
     if req.create_image_task and req.action in {"regenerate_image", "regenerate_both"}:
         merged_fields = dict(fields)
         merged_fields.update(updates)
+        merged_fields["_approval_regeneration_image_task"] = True
         image_task_result = await _execute_image_task(
             ImageTaskRequest(
                 record_id=record_id,
@@ -2638,6 +2718,16 @@ async def discovery_kol_action(
 ):
     _check_auth(settings, authorization)
     return await _execute_kol_action(req, settings=settings)
+
+
+@app.post("/discovery/reference/action")
+async def discovery_reference_action(
+    req: ReferenceActionRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_reference_action(req, settings=settings)
 
 
 @app.post("/generate/brief")

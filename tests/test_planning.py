@@ -597,13 +597,18 @@ class PlanningTest(unittest.TestCase):
             if element.get("tag") == "action"
             for button in element.get("actions", [])
         ]
-        self.assertEqual(action_buttons[0]["value"]["action"], "fbig_kol_action")
-        self.assertIn(action_buttons[0]["value"]["kol_action"], {"approve", "reject_replace", "hold", "block_similar"})
+        self.assertEqual(action_buttons[0]["value"]["action"], "fbig_reference_action")
+        self.assertEqual(action_buttons[0]["value"]["source"], "visual_reference_card_v1")
+        self.assertIn(
+            action_buttons[0]["value"]["reference_action"],
+            {"approve", "reject_replace", "hold", "block_similar"},
+        )
+        self.assertNotIn("kol_action", action_buttons[0]["value"])
         candidate = {"fields": body["candidates"][0]}
 
         with patch.object(discovery_module, "KOL_SEEDS", visual_kol_seeds):
             approve = client.post(
-                "/discovery/kol/action",
+                "/discovery/reference/action",
                 json={
                     "candidate": candidate,
                     "strategies": [strategy()],
@@ -615,15 +620,36 @@ class PlanningTest(unittest.TestCase):
         self.assertEqual(approve.status_code, 200)
         self.assertEqual(approve.json()["reference_fields"]["参考类型"], "博主图片帖")
         self.assertEqual(approve.json()["reference_fields"]["账号/帖子URL"], "https://www.instagram.com/p/ABC123/")
+        self.assertEqual(
+            approve.json()["reference_fields"]["视觉参考缩略图"],
+            {"link": "https://cdn.example.com/ig-abc123.jpg", "text": "https://cdn.example.com/ig-abc123.jpg"},
+        )
+        self.assertEqual(approve.json()["reference_fields"]["品牌适配评分"], 88)
         self.assertEqual(approve.json()["reference_fields"]["图片帖合格性"], "合格")
         self.assertEqual(approve.json()["reference_fields"]["状态"], "可用")
 
         with patch.object(discovery_module, "KOL_SEEDS", visual_kol_seeds):
             reject = client.post(
-                "/discovery/kol/action",
+                "/discovery/reference/action",
                 json={
                     "candidate": candidate,
                     "strategies": [strategy()],
+                    "visual_posts": [
+                        {
+                            "brand": "FUNLAB",
+                            "account_name": "Replacement Visual Creator",
+                            "account_url": "https://www.instagram.com/replacementvisual/",
+                            "post_url": "https://www.instagram.com/p/Replacement01/",
+                            "thumbnail_url": "https://cdn.example.com/replacement.jpg",
+                            "visual_tags": [
+                                "desk setup",
+                                "product dominant",
+                                "product slot",
+                                "no human face",
+                            ],
+                            "borrow": "桌搭构图、自然光和产品居中位置，可替换为 FUNLAB 产品。",
+                        }
+                    ],
                     "existing_candidates": [{"fields": {"账号链接": "https://example.com/used"}}],
                     "action": "reject_replace",
                     "replacement_count": 1,
@@ -633,6 +659,7 @@ class PlanningTest(unittest.TestCase):
         self.assertEqual(reject.status_code, 200)
         self.assertEqual(reject.json()["fields"]["审核状态"], "不合适")
         self.assertEqual(len(reject.json()["replacements"]), 1)
+        self.assertEqual(reject.json()["replacements"][0]["样例帖子1链接"], "https://www.instagram.com/p/Replacement01/")
 
     def test_kol_visual_posts_scores_and_builds_image_preview_card(self):
         client = TestClient(app)

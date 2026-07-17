@@ -143,6 +143,21 @@ class KolActionRequest(BaseModel):
     now: str | None = None
 
 
+class ReferenceActionRequest(BaseModel):
+    candidate_record_id: str | None = None
+    candidate: dict[str, Any] | None = None
+    strategies: list[dict[str, Any]] = Field(default_factory=list)
+    visual_posts: list[dict[str, Any]] = Field(default_factory=list)
+    existing_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    action: Literal["approve", "reject_replace", "hold", "block_similar"]
+    replacement_count: int = Field(default=1, ge=1, le=5)
+    min_score: int = Field(default=70, ge=0, le=100)
+    write_back: bool = False
+    source: Literal["auto", "manual", "replay"] = "manual"
+    week_start: str | None = None
+    now: str | None = None
+
+
 class ImageTaskRequest(BaseModel):
     record_id: str | None = None
     record: dict[str, Any] | None = None

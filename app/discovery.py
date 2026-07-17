@@ -1134,10 +1134,10 @@ def build_kol_review_cards(candidates: list[dict[str, Any]], *, week_start: str 
         brand = "FUNLAB" if brand_key == "FUNLAB" else "Powkong"
         cards.append(
             {
-                "title": f"[SEO/P2] {brand} 本周 KOL 参考候选",
+                "title": f"[SEO/P2] {brand} 本周图片帖参考候选",
                 "brand": brand,
                 "week_start": text_value(week_start),
-                "description": "每个账号单独反馈；不合适几个就补几个新候选。",
+                "description": "每个参考图单独反馈；不合适几个就补几个新候选。",
                 "candidates": [
                     {
                         "candidate_record_id": _record_id(item),
@@ -1222,21 +1222,21 @@ def build_kol_feishu_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     )
                 )
             base_value = {
-                "action": "fbig_kol_action",
+                "action": "fbig_reference_action",
                 "candidate_record_id": text_value(candidate.get("candidate_record_id")),
                 "week_start": text_value(card.get("week_start")),
                 "brand": text_value(card.get("brand")),
                 "candidate_name": text_value(candidate.get("账号名称")),
-                "source": "kol_review_card_v1",
+                "source": "visual_reference_card_v1",
             }
             elements.append(
                 {
                     "tag": "action",
                     "actions": [
-                        _action_button("合适入库", {**base_value, "kol_action": "approve"}, primary=True),
-                        _action_button("不合适换一个", {**base_value, "kol_action": "reject_replace"}, danger=True),
-                        _action_button("暂存观察", {**base_value, "kol_action": "hold"}),
-                        _action_button("屏蔽类似", {**base_value, "kol_action": "block_similar"}),
+                        _action_button("合适入库", {**base_value, "reference_action": "approve"}, primary=True),
+                        _action_button("不合适换一个", {**base_value, "reference_action": "reject_replace"}, danger=True),
+                        _action_button("暂存观察", {**base_value, "reference_action": "hold"}),
+                        _action_button("屏蔽类似", {**base_value, "reference_action": "block_similar"}),
                     ],
                 }
             )
@@ -1259,6 +1259,8 @@ def reference_fields_from_kol(candidate: dict[str, Any]) -> dict[str, Any]:
     brand = "FUNLAB" if _brand_key(fields.get("品牌")) == "FUNLAB" else "Powkong"
     primary_post = text_value(fields.get("样例帖子1链接")) or text_value(fields.get("账号链接"))
     primary_image = text_value(fields.get("样例帖子1图片"))
+    image_link = {"link": primary_image, "text": primary_image} if primary_image else ""
+    score = number_value(fields.get("适配评分") or 0)
     image_quality = "合格" if is_visual_reference_sample_url(primary_post) and primary_image else "待检查"
     image_reason = (
         "已提供 IG/FB 图片帖链接和参考图预览，可作为构图/光线/场景/产品占位参考。"
@@ -1276,16 +1278,16 @@ def reference_fields_from_kol(candidate: dict[str, Any]) -> dict[str, Any]:
         "禁止复制元素": "不复制 KOL 原图、头像、个人口吻、未经授权评测结论或平台水印。",
         "适用品类/产品": text_value(fields.get("适配产品")),
         "视觉标签": text_value(fields.get("内容风格")),
-        "视觉参考缩略图": primary_image,
-        "样例图片链接": primary_image,
+        "视觉参考缩略图": image_link,
+        "样例图片链接": image_link,
         "图片帖合格性": image_quality,
         "图片帖合格原因": image_reason,
         "风险备注": text_value(fields.get("风险备注")),
         "来源类型": "KOL周筛选",
         "发现批次": text_value(fields.get("发现批次")),
         "AI推荐理由": text_value(fields.get("入选原因")),
-        "品牌适配评分": fields.get("适配评分") or "",
-        "视觉可迁移评分": fields.get("适配评分") or "",
+        "品牌适配评分": score,
+        "视觉可迁移评分": score,
         "状态": "可用",
         "审核状态": "已确认",
     }
@@ -1327,6 +1329,48 @@ def apply_kol_action(
         updates.update({"审核状态": "屏蔽类似", "状态": "已屏蔽"})
     else:
         raise ValueError(f"Unsupported KOL action: {action}")
+    return {"updates": updates, "reference_fields": reference_fields, "replacements": replacements}
+
+
+def apply_reference_action(
+    candidate: dict[str, Any],
+    *,
+    action: str,
+    strategies: list[dict[str, Any]],
+    visual_posts: list[dict[str, Any]],
+    existing_candidates: list[dict[str, Any]] | None = None,
+    replacement_count: int = 1,
+    min_score: int = 70,
+    week_start: str | None = None,
+    now: str | None = None,
+) -> dict[str, Any]:
+    fields = _fields(candidate)
+    updates: dict[str, Any] = {"反馈动作": action}
+    reference_fields: dict[str, Any] | None = None
+    replacements: list[dict[str, Any]] = []
+    if action == "approve":
+        updates.update({"审核状态": "已通过", "状态": "已入库"})
+        reference_fields = reference_fields_from_kol(candidate)
+    elif action == "reject_replace":
+        retry_round = int(float(fields.get("retry_round") or 0)) + 1
+        updates.update({"审核状态": "不合适", "状态": "已打回", "retry_round": retry_round})
+        brand_key = _brand_key(fields.get("品牌"))
+        candidates, _rejected = build_kol_visual_post_candidates(
+            strategies,
+            visual_posts,
+            existing_candidates=[*(existing_candidates or []), candidate],
+            week_start=week_start,
+            now=now,
+            per_brand=max(1, min(replacement_count, 5)),
+            min_score=min_score,
+        )
+        replacements = [item for item in candidates if _brand_key(item.get("品牌")) == brand_key][:replacement_count]
+    elif action == "hold":
+        updates.update({"审核状态": "暂存观察", "状态": "暂存观察"})
+    elif action == "block_similar":
+        updates.update({"审核状态": "屏蔽类似", "状态": "已屏蔽"})
+    else:
+        raise ValueError(f"Unsupported reference action: {action}")
     return {"updates": updates, "reference_fields": reference_fields, "replacements": replacements}
 
 
