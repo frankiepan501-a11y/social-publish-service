@@ -167,6 +167,39 @@ class ApprovalCallbackTest(unittest.TestCase):
         self.assertIn("brand_hard_rule_funlab_hidden_emissive_pattern", prompt)
         self.assertIn("Structured feedback patch JSON", prompt)
 
+    def test_carousel_regenerate_image_builds_two_followup_image_tasks(self):
+        resp = self.client.post(
+            "/approval/action",
+            json={
+                "record": approval_record(
+                    **{
+                        "素材类型": "carousel",
+                        "发布位置": ["IG Carousel"],
+                        "Carousel素材file_token": "old_slide_1\nold_slide_2",
+                        "Carousel素材URL": "https://cdn.example.com/old1.jpg\nhttps://cdn.example.com/old2.jpg",
+                    }
+                ),
+                "action": "regenerate_image",
+                "create_image_task": True,
+                "feedback_dimensions": {"产品保真": "按键接口不对"},
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["fields"]["Carousel素材file_token"], "")
+        self.assertEqual(data["fields"]["Carousel素材URL"], "")
+
+        image_task = data["image_task"]
+        self.assertTrue(image_task["ok"])
+        self.assertEqual(image_task["status"], "dry-run-carousel-tasks-built")
+        self.assertEqual(image_task["task_count"], 2)
+        prompts = [item["task_fields"]["自定义提示词"] for item in image_task["image_tasks"]]
+        self.assertIn("Carousel regeneration slide 1/2", prompts[0])
+        self.assertIn("Carousel regeneration slide 2/2", prompts[1])
+        self.assertIn("never collapse Carousel regeneration into one single-image task", prompts[0])
+        self.assertIn("no cable, no connector, and no invented port", prompts[1])
+
     def test_regenerate_copy_can_write_operator_copy_overrides(self):
         resp = self.client.post(
             "/approval/action",

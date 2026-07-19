@@ -445,6 +445,11 @@ def image_feedback_update_fields(
         "图片生成状态": "待生成",
         "图片任务record_id": "",
         "生成图片file_token": "",
+        "Carousel素材file_token": "",
+        "Carousel素材URL": "",
+        "public_asset_url": "",
+        "主图URL": "",
+        "AI生成图链接": "",
         "FB Staged Photo ID": "",
     }
     for dimension in IMAGE_FEEDBACK_DIMENSIONS:

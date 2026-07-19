@@ -39,6 +39,7 @@ from .generation import (
     funlab_ip_compliance_issue,
     has_product_reference_image,
     image_generation_requires_reference,
+    product_asset_directory,
     product_reference_images,
     required_generation_missing,
     validate_generation_payload,
@@ -1317,6 +1318,7 @@ def _build_image_task_fields(record_id: str, fields: dict) -> tuple[dict, list[s
         raw_detail_refs,
     )
     reference_strategy = select_value(fields.get("参考图使用策略")) or DEFAULT_REFERENCE_STRATEGY
+    asset_directory = product_asset_directory(fields)
     missing = []
     if mode != "Codex Image":
         missing.append("图片生成模式 must be Codex Image")
@@ -1344,6 +1346,13 @@ def _build_image_task_fields(record_id: str, fields: dict) -> tuple[dict, list[s
             "Use case: FB/IG organic content candidate image.",
             "Generate a review candidate only.",
             f"Reference strategy: {reference_strategy}. If reference inputs conflict, product fidelity wins over scene style.",
+            (
+                f"Product asset directory mapping: {asset_directory}. "
+                "When this value is present, it is the stable product-asset source path that should supply "
+                "产品正面主图/产品细节图 attachments before falling back to generic product-library images."
+                if asset_directory
+                else "Product asset directory mapping: not provided; use only the attached product references."
+            ),
             (
                 "Reference roles: 设计参考图 is for scene, composition, mood, lighting, camera framing, and borrowing distance only; "
                 "do not copy competitor logos, text, product designs, platform/game UI, or brand marks from it."
@@ -1464,6 +1473,196 @@ async def _copy_product_references_to_image_base(
         if copied_refs:
             next_fields[field_name] = copied_refs
     return next_fields
+
+
+def _is_carousel_content(fields: dict) -> bool:
+    material_type = select_value(fields.get("素材类型"))
+    raw_slots = fields.get("发布位置")
+    slots = raw_slots if isinstance(raw_slots, list) else [text_value(raw_slots)]
+    return material_type == "carousel" or any(text_value(slot) == "IG Carousel" for slot in slots)
+
+
+def _carousel_regeneration_slide_fields(fields: dict, slide_index: int) -> dict:
+    slide_label = f"{slide_index}/2"
+    if slide_index == 1:
+        slide_instruction = (
+            "Carousel regeneration slide 1/2: create the main hero scene for the approved carousel. "
+            "Use the product front/main reference as the product source of truth. Keep the product standalone, "
+            "physically plausible, and unchanged. Do not insert a Switch or other device into the product unless "
+            "the product reference explicitly shows that usage."
+        )
+    else:
+        slide_instruction = (
+            "Carousel regeneration slide 2/2: create a complementary detail or alternate angle for the same carousel. "
+            "Preserve the exact product structure. If an interface or cable location is not visible in the selected "
+            "product reference, show no cable, no connector, and no invented port on that face."
+        )
+    next_fields = dict(fields)
+    base_prompt = text_value(next_fields.get("AI图片Prompt"))
+    next_fields["AI图片Prompt"] = "\n\n".join(part for part in [base_prompt, slide_instruction] if part)
+    next_fields["_carousel_slide_label"] = slide_label
+    return next_fields
+
+
+async def _execute_carousel_image_tasks(
+    record_id: str,
+    fields: dict,
+    *,
+    write_task: bool,
+    settings: Settings,
+) -> dict:
+    run_id = f"imgtaskcarouselv1-{uuid.uuid4().hex[:16]}"
+    base_fields = await _enrich_content_fields_with_product_context(fields, settings)
+    base_fields["_force_image_task"] = True
+    base_fields["_approval_regeneration_image_task"] = True
+    mode = "commit" if write_task else "dry-run"
+    image_tasks = []
+    missing = []
+
+    for slide_index in (1, 2):
+        slide_fields = _carousel_regeneration_slide_fields(base_fields, slide_index)
+        task_fields, task_missing, _task_hash = _build_image_task_fields(record_id, slide_fields)
+        task_fields["自定义提示词"] = "\n\n".join(
+            [
+                task_fields["自定义提示词"],
+                f"Carousel output contract: generate exactly slide {slide_index}/2 for this carousel. "
+                "This callback must create two separate image tasks; never collapse Carousel regeneration into one single-image task.",
+            ]
+        )
+        raw_task_fields = json.dumps(task_fields, ensure_ascii=False, sort_keys=True, default=str)
+        task_hash = hashlib.sha256(raw_task_fields.encode("utf-8")).hexdigest()
+        image_tasks.append(
+            {
+                "slide_index": slide_index,
+                "slide_label": slide_fields["_carousel_slide_label"],
+                "task_fields": task_fields,
+                "input_hash": task_hash,
+            }
+        )
+        if task_missing:
+            missing.append({"slide_index": slide_index, "missing": task_missing})
+
+    combined_hash = hashlib.sha256(
+        json.dumps(
+            [{"slide_index": item["slide_index"], "input_hash": item["input_hash"]} for item in image_tasks],
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+    if missing:
+        await _write_log(
+            settings,
+            run_id=run_id,
+            record_id=record_id,
+            node="image-task/create-carousel",
+            status="error",
+            input_hash=combined_hash,
+            output_summary=json.dumps(missing, ensure_ascii=False),
+            decision_reason="CAROUSEL_IMAGE_TASK_INPUT_MISSING",
+            mode=mode,
+        )
+        return {"ok": False, "status": "blocked", "run_id": run_id, "missing": missing, "image_tasks": image_tasks}
+
+    if write_task and not settings.image_task_write_enabled:
+        await _write_log(
+            settings,
+            run_id=run_id,
+            record_id=record_id,
+            node="image-task/create-carousel-gate",
+            status="blocked",
+            input_hash=combined_hash,
+            output_summary="SOCIAL_IMAGE_TASK_WRITE_ENABLED=false",
+            decision_reason="IMAGE_TASK_WRITE_DISABLED",
+            mode=mode,
+        )
+        return {"ok": False, "status": "blocked", "run_id": run_id, "blocking": [{"code": "IMAGE_TASK_WRITE_DISABLED"}], "image_tasks": image_tasks}
+
+    if not write_task:
+        await _write_log(
+            settings,
+            run_id=run_id,
+            record_id=record_id,
+            node="image-task/create-carousel",
+            status="dry-run",
+            input_hash=combined_hash,
+            output_summary=f"carousel_image_tasks={len(image_tasks)}",
+            decision_reason="carousel-image-task-dry-run",
+            mode=mode,
+        )
+        return {
+            "ok": True,
+            "status": "dry-run-carousel-tasks-built",
+            "run_id": run_id,
+            "task_count": len(image_tasks),
+            "image_tasks": image_tasks,
+            "input_hash": combined_hash,
+        }
+
+    image_client = _feishu_image(settings)
+    content_client = _feishu(settings)
+    if image_client is None or content_client is None:
+        raise HTTPException(status_code=503, detail="Feishu env is not configured")
+
+    created_tasks = []
+    for item in image_tasks:
+        copied_fields = await _copy_product_references_to_image_base(
+            item["task_fields"],
+            content_client=content_client,
+            image_client=image_client,
+        )
+        raw_task_fields = json.dumps(copied_fields, ensure_ascii=False, sort_keys=True, default=str)
+        item_hash = hashlib.sha256(raw_task_fields.encode("utf-8")).hexdigest()
+        created = await image_client.create_record(settings.image_task_table_id, copied_fields)
+        image_task_record_id = text_value(created.get("record", {}).get("record_id")) or text_value(created.get("record_id"))
+        created_tasks.append(
+            {
+                "slide_index": item["slide_index"],
+                "slide_label": item["slide_label"],
+                "image_task_record_id": image_task_record_id,
+                "task_fields": copied_fields,
+                "input_hash": item_hash,
+            }
+        )
+
+    task_ids = [item["image_task_record_id"] for item in created_tasks if item.get("image_task_record_id")]
+    if record_id != "inline" and task_ids:
+        await content_client.update_record(
+            settings.content_table_id,
+            record_id,
+            {
+                "图片生成状态": "已提交",
+                "图片任务record_id": "\n".join(task_ids),
+                "Carousel素材file_token": "",
+                "Carousel素材URL": "",
+                "public_asset_url": "",
+                "主图URL": "",
+                "AI生成图链接": "",
+                "FB Staged Photo ID": "",
+                "运行/回放ID": run_id,
+            },
+        )
+
+    await _write_log(
+        settings,
+        run_id=run_id,
+        record_id=record_id,
+        node="image-task/create-carousel",
+        status="success",
+        input_hash=combined_hash,
+        output_summary=f"carousel_image_task_record_ids={','.join(task_ids)}",
+        decision_reason="carousel-image-tasks-created",
+        mode=mode,
+    )
+    return {
+        "ok": True,
+        "status": "carousel-tasks-created",
+        "run_id": run_id,
+        "task_count": len(created_tasks),
+        "image_task_record_ids": task_ids,
+        "image_tasks": created_tasks,
+        "input_hash": combined_hash,
+    }
 
 
 def _image_task_candidate_reason(fields: dict, *, force: bool = False) -> tuple[bool, str]:
@@ -2567,16 +2766,24 @@ async def _execute_approval_action(req: ApprovalActionRequest, settings: Setting
         merged_fields = dict(fields)
         merged_fields.update(updates)
         merged_fields["_approval_regeneration_image_task"] = True
-        image_task_result = await _execute_image_task(
-            ImageTaskRequest(
-                record_id=record_id,
-                record={"record_id": record_id, "fields": merged_fields},
+        if _is_carousel_content(merged_fields):
+            image_task_result = await _execute_carousel_image_tasks(
+                record_id,
+                merged_fields,
                 write_task=req.write_back,
-                source="manual",
-                force=True,
-            ),
-            settings=settings,
-        )
+                settings=settings,
+            )
+        else:
+            image_task_result = await _execute_image_task(
+                ImageTaskRequest(
+                    record_id=record_id,
+                    record={"record_id": record_id, "fields": merged_fields},
+                    write_task=req.write_back,
+                    source="manual",
+                    force=True,
+                ),
+                settings=settings,
+            )
 
     await _write_log(
         settings,

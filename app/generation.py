@@ -42,6 +42,10 @@ IMAGE_PROMPT_FORBIDDEN_PRODUCT_CHANGE_RE = re.compile(
 )
 
 PRODUCT_REFERENCE_FIELD_NAMES = (
+    "产品正面主图",
+    "FBIG产品正面主图",
+    "社媒产品主图",
+    "产品主图",
     "产品参考图包",
     "产品参考图",
     "产品原图",
@@ -56,10 +60,19 @@ DESIGN_REFERENCE_FIELD_NAMES = (
     "博主参考图",
 )
 DETAIL_REFERENCE_FIELD_NAMES = (
+    "产品细节图",
+    "FBIG产品细节图",
+    "社媒产品细节图",
     "细节参考图",
     "按键参考图",
     "纹路参考图",
     "接口参考图",
+)
+PRODUCT_ASSET_DIRECTORY_FIELD_NAMES = (
+    "产品资产目录",
+    "设计部资产目录",
+    "FBIG产品资产目录",
+    "社媒产品资产目录",
 )
 DEFAULT_REFERENCE_STRATEGY = "产品保真优先"
 FUNLAB_IP_ALLOWED_STATUSES = {"合规-无IP", "合规-已授权"}
@@ -159,9 +172,20 @@ def generation_input_hash(fields: dict[str, Any]) -> str:
         "IP合规状态",
         "IP合规备注",
         "设计参考图",
+        "产品资产目录",
+        "设计部资产目录",
+        "FBIG产品资产目录",
+        "社媒产品资产目录",
+        "产品正面主图",
+        "FBIG产品正面主图",
+        "社媒产品主图",
+        "产品主图",
         "产品参考图包",
         "产品参考图",
         "产品原图",
+        "产品细节图",
+        "FBIG产品细节图",
+        "社媒产品细节图",
         "细节参考图",
         "参考图使用策略",
         "参考对象",
@@ -213,6 +237,14 @@ def design_reference_images(fields: dict[str, Any]) -> list[Any]:
 
 def detail_reference_images(fields: dict[str, Any]) -> list[Any]:
     return _reference_images_from_fields(fields, DETAIL_REFERENCE_FIELD_NAMES)
+
+
+def product_asset_directory(fields: dict[str, Any]) -> str:
+    for field_name in PRODUCT_ASSET_DIRECTORY_FIELD_NAMES:
+        value = text_value(fields.get(field_name))
+        if value:
+            return value
+    return ""
 
 
 def has_product_reference_image(fields: dict[str, Any]) -> bool:

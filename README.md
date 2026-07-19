@@ -48,6 +48,7 @@ Image task bridge:
   - `产品参考图包`: product source-of-truth pack for product shape, proportions, color, material, buttons, ports, textures, visible markings, and accessory layout.
   - `细节参考图`: detail override pack for small buttons, icons, ports, shell pattern, and other high-risk product-fidelity details.
 - `参考图使用策略` defaults to `产品保真优先`. If references conflict, `产品参考图包` and `细节参考图` override `设计参考图`.
+- Product asset mapping is stable by field name before generic fallback: `产品资产目录` / `设计部资产目录` / `FBIG产品资产目录` / `社媒产品资产目录` describe the maintained design-asset directory, `产品正面主图` / `FBIG产品正面主图` / `社媒产品主图` / `产品主图` override generic product-library images, and `产品细节图` / `FBIG产品细节图` / `社媒产品细节图` override detail references. These fields are preferred over unlabeled `图片` attachments when present.
 - The service still writes legacy `产品原图` with the same attachments as `产品参考图包` so old deployment workers remain compatible.
 - `POST /image-task/ingest` maps a worker result back to content fields such as `图片生成状态`, `生成图片file_token`, and `AI生成图链接`.
 - `POST /image-task/ingest-scan` selects content records that already have `图片任务record_id` but do not yet have a complete image result, then calls the same ingest path per record.
@@ -67,6 +68,7 @@ Approval callback:
 - The endpoint returns dry-run updates by default. Real Feishu writeback requires both `write_back=true` and `SOCIAL_APPROVAL_WRITEBACK_ENABLED=true`.
 - Regenerating an image clears stale image task/result fields and moves `图片生成状态=待生成`; it does not approve, confirm final assets, or publish.
 - When `create_image_task=true`, image regeneration also builds the next Codex Image task from the patched fields. With `write_back=false`, the image task is dry-run only and returned in the response. With `write_back=true`, the task is written only if `SOCIAL_IMAGE_TASK_WRITE_ENABLED=true`.
+- Carousel approval regeneration is not allowed to fall back to the single-image task path. If `素材类型=carousel` or `发布位置=IG Carousel`, `regenerate_image` / `regenerate_both` creates two slide-specific Codex Image tasks, clears stale `Carousel素材file_token` / `Carousel素材URL` / public URL fields, and keeps final publish blocked until the two new worker results are approved, converted to public URLs, and dry-run clean.
 - `scripts/send_approval_card_v3.py --send` sends a real v3 Feishu whole-post review card through the event-hub app. It reuses `IMAGE_FEEDBACK_DIMENSIONS`, uploads the design-reference/current generated images as IM images, displays the current `Caption EN` / `Hashtag EN`, and includes editable `caption_en_override` / `hashtag_en_override` inputs. Product reference images are for internal image-generation source-of-truth, not the operator comparison slot.
 - The card button value carries `original_caption_en` / `original_hashtag_en`; n8n compares submitted input values against those originals and only sends changed text in `copy_overrides`. This prevents prefilled inputs from locking unchanged copy accidentally.
 - Feishu form cards must put `form_submit` buttons directly under `form.elements`. Do not wrap submit buttons in an `action` container inside a form, because the Feishu client can silently hide the whole form.
@@ -100,6 +102,10 @@ Replay:
 - Generation replay is dry-run only. It cannot approve, confirm assets, publish, or write fields back.
 
 Operational fixes:
+- 2026-07-20 Carousel approval regeneration and product-asset mapping hardening:
+  - Problem: clicking `重生图片` on a Carousel approval card could call the generic single-image approval-regeneration path, creating one image task and potentially reusing a weak generic product-library `image.png` instead of the maintained design-asset source.
+  - Fix: `/approval/action` now detects Carousel content and routes `regenerate_image` / `regenerate_both` with `create_image_task=true` to a dedicated two-slide task builder. Image regeneration also clears stale Carousel tokens and public URLs. Product-reference selection now recognizes stable asset fields such as `产品资产目录`, `产品正面主图`, and `产品细节图` before generic fallback fields.
+  - Verification: local `py_compile` passed for the touched modules; targeted approval tests passed 11 tests; full local `unittest` suite passed 119 tests with service-token env cleared.
 - 2026-07-16 FB/IG image-task product-reference copy:
   - Problem: the four-account P2 validation reached generated content, but `/image-task/create {"write_task":true}` returned HTTP 500 for records that used product-library reference attachments.
   - Root cause: product-library attachment objects include a `url` with `bitablePerm` context. The image-task bridge copied attachments by calling the generic `/drive/v1/medias/{file_token}/download` path only, which can fail when the service app needs the attachment-scoped download URL. A second compatibility issue was that the content-calendar writeback included `图片生成模式`, which may not exist in the production content table.
