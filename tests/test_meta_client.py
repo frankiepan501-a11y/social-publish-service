@@ -98,8 +98,11 @@ class MetaClientTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, {"data": []})
         self.assertEqual(client.calls[0][1], "media-1/insights")
-        self.assertIn("saved", client.calls[0][2]["params"]["metric"].split(","))
-        self.assertNotIn("saves", client.calls[0][2]["params"]["metric"].split(","))
-
+        metrics = client.calls[0][2]["params"]["metric"].split(",")
+        self.assertIn("saved", metrics)
+        self.assertNotIn("impressions", metrics)
+        self.assertNotIn("saves", metrics)
 if __name__ == "__main__":
     unittest.main()
+
+
