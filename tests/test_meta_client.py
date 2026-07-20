@@ -102,7 +102,23 @@ class MetaClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("saved", metrics)
         self.assertNotIn("impressions", metrics)
         self.assertNotIn("saves", metrics)
+
+    async def test_facebook_post_insights_uses_current_metric_names(self):
+        client = FakeMetaClient([{"data": []}])
+
+        result = await client.fb_post_insights("post-1")
+
+        self.assertEqual(result, {"data": []})
+        self.assertEqual(client.calls[0][1], "post-1/insights")
+        metrics = client.calls[0][2]["params"]["metric"].split(",")
+        self.assertIn("post_clicks", metrics)
+        self.assertIn("post_clicks_by_type", metrics)
+        self.assertIn("post_reactions_by_type_total", metrics)
+        self.assertIn("post_activity_by_action_type", metrics)
+        self.assertNotIn("post_impressions", metrics)
+        self.assertNotIn("post_engaged_users", metrics)
 if __name__ == "__main__":
     unittest.main()
+
 
 

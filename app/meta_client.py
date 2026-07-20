@@ -166,6 +166,12 @@ class MetaClient:
         return await self._request(
             "GET",
             f"{post_id}/insights",
-            params={"metric": "post_impressions,post_engaged_users,post_clicks,post_reactions_by_type_total"},
+            params={
+                "metric": (
+                    "post_clicks,post_clicks_by_type,post_reactions_by_type_total,"
+                    "post_activity_by_action_type,post_consumptions,post_consumptions_by_type"
+                )
+            },
         )
+
 
