@@ -95,6 +95,12 @@ def _check_auth(settings: Settings, authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
+def _platform_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.lower() in {"none", "null", "nan"}:
+        return ""
+    return text
+
 def _feishu_writeback_detail(exc: FeishuError) -> dict[str, str]:
     return {
         "code": "FEISHU_WRITEBACK_FAILED",
@@ -3108,11 +3114,11 @@ async def insights_poll(
             raise HTTPException(status_code=503, detail="Feishu env is not configured")
         record = await client.get_record(settings.content_table_id, req.record_id)
     fields = record.get("fields", record)
-    media_id = str(fields.get("IG Media ID", "")).strip()
+    media_id = _platform_id(fields.get("IG Media ID"))
     post_id = (
-        str(fields.get("Meta Page Post ID", "")).strip()
-        or str(fields.get("FB Photo ID", "")).strip()
-        or str(fields.get("平台返回ID", "")).strip()
+        _platform_id(fields.get("Meta Page Post ID"))
+        or _platform_id(fields.get("FB Photo ID"))
+        or _platform_id(fields.get("平台返回ID"))
     )
     brand = select_value(fields.get("品牌")) or text_value(fields.get("品牌"))
     meta_access_token = settings.meta_token_for_brand(brand)
@@ -3135,3 +3141,4 @@ async def insights_poll(
             "message": str(exc),
         }
     return {"ok": True, "status": "insights-fetched", "window": req.window, "data": data}
+
