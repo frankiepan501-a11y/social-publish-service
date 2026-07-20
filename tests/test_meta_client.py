@@ -91,5 +91,15 @@ class MetaClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.calls[1][2]["params"]["fields"], "id,link")
 
 
+    async def test_instagram_media_insights_uses_saved_metric_name(self):
+        client = FakeMetaClient([{"data": []}])
+
+        result = await client.ig_media_insights("media-1")
+
+        self.assertEqual(result, {"data": []})
+        self.assertEqual(client.calls[0][1], "media-1/insights")
+        self.assertIn("saved", client.calls[0][2]["params"]["metric"].split(","))
+        self.assertNotIn("saves", client.calls[0][2]["params"]["metric"].split(","))
+
 if __name__ == "__main__":
     unittest.main()

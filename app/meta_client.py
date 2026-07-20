@@ -159,7 +159,7 @@ class MetaClient:
         return await self._request(
             "GET",
             f"{media_id}/insights",
-            params={"metric": "impressions,reach,likes,comments,shares,saves,total_interactions"},
+            params={"metric": "impressions,reach,likes,comments,shares,saved,total_interactions"},
         )
 
     async def fb_post_insights(self, post_id: str) -> dict:
@@ -168,3 +168,4 @@ class MetaClient:
             f"{post_id}/insights",
             params={"metric": "post_impressions,post_engaged_users,post_clicks,post_reactions_by_type_total"},
         )
+

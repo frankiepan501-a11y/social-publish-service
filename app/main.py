@@ -3109,16 +3109,29 @@ async def insights_poll(
         record = await client.get_record(settings.content_table_id, req.record_id)
     fields = record.get("fields", record)
     media_id = str(fields.get("IG Media ID", "")).strip()
-    post_id = str(fields.get("Meta Page Post ID", "")).strip()
+    post_id = (
+        str(fields.get("Meta Page Post ID", "")).strip()
+        or str(fields.get("FB Photo ID", "")).strip()
+        or str(fields.get("平台返回ID", "")).strip()
+    )
     brand = select_value(fields.get("品牌")) or text_value(fields.get("品牌"))
     meta_access_token = settings.meta_token_for_brand(brand)
     if not meta_access_token:
         return {"ok": False, "status": "blocked", "reason": "META_TOKEN_MISSING"}
     meta = MetaClient(meta_access_token, settings.graph_version)
-    if media_id:
-        data = await meta.ig_media_insights(media_id)
-    elif post_id:
-        data = await meta.fb_post_insights(post_id)
-    else:
-        return {"ok": False, "status": "blocked", "reason": "PLATFORM_ID_MISSING"}
+    try:
+        if media_id:
+            data = await meta.ig_media_insights(media_id)
+        elif post_id:
+            data = await meta.fb_post_insights(post_id)
+        else:
+            return {"ok": False, "status": "blocked", "reason": "PLATFORM_ID_MISSING"}
+    except MetaApiError as exc:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "reason": "META_INSIGHTS_FAILED",
+            "error_code": exc.code,
+            "message": str(exc),
+        }
     return {"ok": True, "status": "insights-fetched", "window": req.window, "data": data}
