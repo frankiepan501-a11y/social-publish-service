@@ -227,6 +227,16 @@ class SocialCrmP0SyncRequest(BaseModel):
     skip_x: bool = False
 
 
+class SocialCrmP1PublishRequest(BaseModel):
+    record_id: str | None = None
+    record: dict[str, Any] | None = None
+    account_config: dict[str, Any] | None = None
+    recent_records: list[dict[str, Any]] = Field(default_factory=list)
+    now: str | None = None
+    source: Literal["auto", "manual", "replay"] = "manual"
+    canary: bool = False
+
+
 class InsightsPollRequest(BaseModel):
     record_id: str | None = None
     record: dict[str, Any] | None = None

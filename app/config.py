@@ -61,6 +61,7 @@ class Settings:
     social_crm_x_client_powkong_json: str = os.getenv("SOCIAL_CRM_X_CLIENT_POWKONG_JSON", "")
     social_crm_x_token_powkong_json: str = os.getenv("SOCIAL_CRM_X_TOKEN_POWKONG_JSON", "")
     social_crm_x_token_persist_path: str = os.getenv("SOCIAL_CRM_X_TOKEN_PERSIST_PATH", "/tmp/social_crm_x_tokens.json")
+    social_crm_p1_publish_enabled: bool = env_bool("SOCIAL_CRM_P1_PUBLISH_ENABLED", False)
 
     generation_ai_provider: str = os.getenv("GENERATION_AI_PROVIDER", "template")
     generation_ai_base_url: str = os.getenv("GENERATION_AI_BASE_URL", "https://api.deepseek.com")
@@ -117,6 +118,9 @@ class Settings:
             and self.social_crm_x_client_powkong_json
             and self.social_crm_x_token_powkong_json
         )
+
+    def social_crm_p1_publish_configured(self) -> bool:
+        return self.meta_enabled() and self.feishu_enabled()
 
 
 def get_settings() -> Settings:

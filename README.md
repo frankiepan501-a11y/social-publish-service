@@ -112,7 +112,23 @@ Social CRM P0 sync:
 - Feishu Base writeback: P0 uses the Feishu 1号 app as the Base writing identity because it already has the newer Base scopes and has been added as an edit collaborator on `Social CRM P0 工作台`. The older 2号 Bitable app still lacks these new scopes and should not be used for this P0 endpoint until it is republished with `base:field:read`, `base:record:read`, `base:record:create`, and `base:record:update`.
 - Do not put token values, client secrets, passwords, or authorization headers into Base, README, n8n node notes, or execution logs.
 
+Social CRM P1 publish canary:
+- `POST /social-crm-p1/publish/dry-run`
+- `POST /social-crm-p1/publish/commit`
+- Purpose: first real-publish adapter for the Social CRM P1 workflow. It accepts one Social CRM draft/scheduled record, maps the lightweight CRM fields into the existing FB/IG publish validation contract, and then reuses `/publish/dry-run` or `/publish/commit`.
+- Scope: Meta only. First canary supports Facebook Page image posts and Instagram Feed single-image posts. X, YouTube, TikTok, LinkedIn, comments, DMs, ads, bulk publishing, and all automatic publish scans remain out of scope.
+- Safety:
+  - Dry-run can validate one record without social-platform writes.
+  - Commit is blocked unless all of these are true: request has `canary=true`, request has `source=manual`, the mapped record has `真实发布授权时间` or `真实发布授权=true`, `SOCIAL_CRM_P1_PUBLISH_ENABLED=true`, and the existing global `SOCIAL_PUBLISH_COMMIT_ENABLED=true`.
+  - The endpoint is single-record only. It does not scan a table and must not be connected to a cron node for commit.
+  - The response includes `social_crm_p1.writeback_hint`, so n8n can write `dry-run 结果` and `发后回读链接` back to the CRM table after a separate human-approved workflow step.
+- Field mapping accepts the P1 working-table names `草稿状态`, `审批结果`, `最终素材确认`, `发帖文案`, `话题标签`, `图片URL` / `发布图片URL`, `计划发布时间`, and maps account handles like `@powkong_official` to the existing account names `POWKONG IG` / `POWKONG FB` / `FUNLAB IG` / `FUNLAB FB` when brand and platform are present.
+
 Operational fixes:
+- 2026-07-22 Social CRM P1 publish canary adapter:
+  - Problem: P0 had account status and post sync, but the first real-publish path still required callers to know the older FB/IG content-calendar schema and could be miswired into broad `/publish/scan` behavior.
+  - Fix: added `/social-crm-p1/publish/dry-run` and `/social-crm-p1/publish/commit`, a CRM-to-publish field mapper, and a second P1 publish gate `SOCIAL_CRM_P1_PUBLISH_ENABLED`. Commit is canary-only, manual-only, authorization-time-required, and still obeys `SOCIAL_PUBLISH_COMMIT_ENABLED`.
+  - Verification: `py_compile` passed for the touched modules; `tests.test_social_crm_p1` passed 6 tests; local full `unittest discover -s tests -v` passed 135 tests with `SOCIAL_PUBLISH_API_TOKEN` cleared and `GENERATION_AI_PROVIDER=template`.
 - 2026-07-22 Social CRM P0 cloud writeback and daily cron:
   - Problem: Feishu 2号 app lacked the new Base scopes, Base v3 record-list parsing used the wrong response shape, single-record v3 writes used the wrong method/body wrapper, and the initial n8n workflow connections were saved with a flattened array shape that prevented activation.
   - Fix: moved P0 Base writeback to the Feishu 1号 app, parsed Base v3 records from `fields + data + record_id_list`, changed single-record writes to raw-field `POST` / `PATCH`, added per-platform runtime bounds with blocker fallback, and repaired the n8n workflow connections shape.
@@ -229,6 +245,7 @@ Required environment for production:
 - `SOCIAL_CRM_X_CLIENT_POWKONG_JSON`
 - `SOCIAL_CRM_X_TOKEN_POWKONG_JSON`
 - `SOCIAL_CRM_X_TOKEN_PERSIST_PATH`
+- `SOCIAL_CRM_P1_PUBLISH_ENABLED` (`false` by default; required in addition to `SOCIAL_PUBLISH_COMMIT_ENABLED` for Social CRM P1 canary commits)
 
 Local check:
 

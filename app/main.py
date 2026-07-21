@@ -48,7 +48,7 @@ from .meta_client import MetaApiError, MetaClient
 from .models import ApprovalActionRequest, ApprovalCardPreviewRequest
 from .models import GenerateBriefRequest, GenerateScanRequest, InsightsPollRequest, PublishRequest, PublishScanRequest, ReplayRequest
 from .models import PlanDailyConfirmRequest, PlanReselectRequest, PlanWeeklyRequest
-from .models import SocialCrmP0SyncRequest
+from .models import SocialCrmP0SyncRequest, SocialCrmP1PublishRequest
 from .models import (
     KolActionRequest,
     KolVisualPostDiscoveryRequest,
@@ -84,6 +84,11 @@ from .rules import (
     text_value,
 )
 from .social_crm_p0 import run_social_crm_p0_sync
+from .social_crm_p1 import (
+    build_social_crm_p1_publish_request,
+    social_crm_p1_precheck,
+    social_crm_p1_writeback_hint,
+)
 
 
 app = FastAPI(title="social-publish-service", version="0.1.0")
@@ -2813,6 +2818,47 @@ async def _execute_approval_action(req: ApprovalActionRequest, settings: Setting
     }
 
 
+async def _execute_social_crm_p1_publish(req: SocialCrmP1PublishRequest, *, commit: bool, settings: Settings) -> dict:
+    if not req.record and not req.record_id:
+        raise HTTPException(status_code=400, detail="record_id or record is required")
+    raw_record = req.record
+    if raw_record is None:
+        record_id, raw_record = await _load_record(PublishRequest(record_id=req.record_id), settings)
+    else:
+        record_id = req.record_id or raw_record.get("record_id", "inline-social-crm-p1")
+        raw_record = {"record_id": record_id, "fields": raw_record.get("fields", raw_record)}
+
+    publish_req = build_social_crm_p1_publish_request(req, raw_record)
+    mapped_fields = normalize_fields(publish_req.record or {})
+    precheck = social_crm_p1_precheck(
+        req,
+        mapped_fields,
+        commit=commit,
+        p1_publish_enabled=settings.social_crm_p1_publish_enabled,
+    )
+    if precheck:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "mode": "commit" if commit else "dry-run",
+            "record_id": publish_req.record_id,
+            "blocking": precheck,
+            "mapped_fields": mapped_fields,
+            "writeback_hint": social_crm_p1_writeback_hint({"ok": False, "status": "blocked", "blocking": precheck}),
+        }
+
+    result = await _execute_publish(publish_req, commit=commit, settings=settings)
+    result["social_crm_p1"] = {
+        "record_id": publish_req.record_id,
+        "mode": "commit" if commit else "dry-run",
+        "canary": req.canary,
+        "source": req.source,
+        "mapped_fields": mapped_fields,
+        "writeback_hint": social_crm_p1_writeback_hint(result),
+    }
+    return result
+
+
 @app.get("/health")
 async def health(settings: Settings = Depends(get_settings)):
     return {
@@ -2833,6 +2879,9 @@ async def health(settings: Settings = Depends(get_settings)):
         "social_crm_p0_write_enabled": settings.social_crm_p0_write_enabled,
         "social_crm_p0_youtube_configured": settings.social_crm_p0_youtube_enabled(),
         "social_crm_p0_x_configured": settings.social_crm_p0_x_enabled(),
+        "social_crm_p1_publish_configured": settings.social_crm_p1_publish_configured(),
+        "social_crm_p1_publish_enabled": settings.social_crm_p1_publish_enabled,
+        "social_crm_p1_canary_only": True,
         "generation_ai_provider": settings.generation_ai_provider,
         "generation_ai_configured": settings.generation_ai_enabled(),
     }
@@ -2846,6 +2895,26 @@ async def social_crm_p0_sync(
 ):
     _check_auth(settings, authorization)
     return await run_social_crm_p0_sync(req, settings)
+
+
+@app.post("/social-crm-p1/publish/dry-run")
+async def social_crm_p1_publish_dry_run(
+    req: SocialCrmP1PublishRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_social_crm_p1_publish(req, commit=False, settings=settings)
+
+
+@app.post("/social-crm-p1/publish/commit")
+async def social_crm_p1_publish_commit(
+    req: SocialCrmP1PublishRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await _execute_social_crm_p1_publish(req, commit=True, settings=settings)
 
 
 @app.post("/plan/weekly")
