@@ -109,10 +109,15 @@ Social CRM P0 sync:
 - Meta: reuses this service's existing Meta environment and calls `/insights/poll` internally for the known P0 record samples.
 - YouTube: uses OAuth token JSON stored in Zeabur environment variables. It refreshes access tokens in memory for each run and reads channel, recent videos, and basic analytics only.
 - X: uses OAuth 2.0 user-context credentials stored in Zeabur environment variables. It refreshes access tokens, reads user identity and recent original posts, and retries short-lived 429/5xx errors. Rotated token JSON is persisted only to the runtime path `SOCIAL_CRM_X_TOKEN_PERSIST_PATH`; move it to a durable secret store later if daily jobs must survive container rebuilds without reusing the original refresh token.
-- Feishu blocker to watch: the Base writing app must have the newer Base scopes for `base:field:read`, `base:record:read`, `base:record:create`, and `base:record:update`, and must be a collaborator on `Social CRM P0 工作台`. Without those scopes the endpoint can read platforms but cannot write P0 Base rows.
+- Feishu Base writeback: P0 uses the Feishu 1号 app as the Base writing identity because it already has the newer Base scopes and has been added as an edit collaborator on `Social CRM P0 工作台`. The older 2号 Bitable app still lacks these new scopes and should not be used for this P0 endpoint until it is republished with `base:field:read`, `base:record:read`, `base:record:create`, and `base:record:update`.
 - Do not put token values, client secrets, passwords, or authorization headers into Base, README, n8n node notes, or execution logs.
 
 Operational fixes:
+- 2026-07-22 Social CRM P0 cloud writeback and daily cron:
+  - Problem: Feishu 2号 app lacked the new Base scopes, Base v3 record-list parsing used the wrong response shape, single-record v3 writes used the wrong method/body wrapper, and the initial n8n workflow connections were saved with a flattened array shape that prevented activation.
+  - Fix: moved P0 Base writeback to the Feishu 1号 app, parsed Base v3 records from `fields + data + record_id_list`, changed single-record writes to raw-field `POST` / `PATCH`, added per-platform runtime bounds with blocker fallback, and repaired the n8n workflow connections shape.
+  - Deployment: Zeabur is running commit `e80f838`; `SOCIAL_CRM_P0_WRITE_ENABLED=true`; `SOCIAL_CRM_P0_PART_TIMEOUT_SECONDS=35`; n8n workflow `gaZANFzMlX0r4ZJs` is active as `Social CRM P0 Daily Sync`, timezone `Asia/Shanghai`, cron `20 9 * * *`.
+  - Verification: local `unittest discover -s tests -v` passed 129 tests; remote X-only commit completed in 5.9s; remote full commit completed in 21.7s with Meta / YouTube / X parts, `post_rows.updated=16`, `snapshot_rows.updated=8`, and `errors=[]`; sanitized evidence scan returned zero hits for token/client-secret/Authorization patterns.
 - 2026-07-21 Social CRM P0 cloud sync endpoint:
   - Problem: the local P0 script could sync Meta / YouTube / X into Feishu Base, but daily cloud execution was still missing a stable webhook endpoint and Zeabur environment-variable contract.
   - Fix: added `/social-crm-p0/sync`, P0-specific config flags, YouTube and X OAuth refresh/read paths, sanitized Feishu Base v3 upsert logic, and health flags for P0 Base / YouTube / X configuration.
