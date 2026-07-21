@@ -835,53 +835,55 @@ class FeishuBaseV3:
 
     async def list_records(self, table_id: str) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
-        page_token = ""
+        offset = 0
+        limit = 200
         while True:
-            params = {"page_size": 200}
-            if page_token:
-                params["page_token"] = page_token
+            params = {"limit": limit, "offset": offset}
             data = await self.request("GET", f"/base/v3/bases/{self.base_token}/tables/{table_id}/records", params=params)
             body = data.get("data", {})
-            items.extend(body.get("items", []))
+            page_items = parse_base_v3_records_page(body)
+            items.extend(page_items)
             if not body.get("has_more"):
                 return items
-            page_token = body.get("page_token", "")
+            if not page_items:
+                return items
+            offset += len(page_items)
 
     async def create_record(self, table_id: str, fields: dict[str, Any]) -> dict[str, Any]:
         data = await self.request(
             "POST",
             f"/base/v3/bases/{self.base_token}/tables/{table_id}/records",
-            json={"fields": fields},
+            json=fields,
         )
         return data.get("data", {})
-
-    async def batch_create_records(self, table_id: str, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if not records:
-            return []
-        data = await self.request(
-            "POST",
-            f"/bitable/v1/apps/{self.base_token}/tables/{table_id}/records/batch_create",
-            json={"records": records},
-        )
-        return data.get("data", {}).get("records", [])
-
-    async def batch_update_records(self, table_id: str, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if not records:
-            return []
-        data = await self.request(
-            "POST",
-            f"/bitable/v1/apps/{self.base_token}/tables/{table_id}/records/batch_update",
-            json={"records": records},
-        )
-        return data.get("data", {}).get("records", [])
 
     async def update_record(self, table_id: str, record_id: str, fields: dict[str, Any]) -> dict[str, Any]:
         data = await self.request(
-            "PUT",
+            "PATCH",
             f"/base/v3/bases/{self.base_token}/tables/{table_id}/records/{record_id}",
-            json={"fields": fields},
+            json=fields,
         )
         return data.get("data", {})
+
+
+def parse_base_v3_records_page(body: dict[str, Any]) -> list[dict[str, Any]]:
+    items = body.get("items")
+    if isinstance(items, list):
+        return items
+
+    fields = body.get("fields") or []
+    rows = body.get("data") or []
+    record_ids = body.get("record_id_list") or []
+    parsed: list[dict[str, Any]] = []
+    for record_id, row in zip(record_ids, rows):
+        row_fields: dict[str, Any] = {}
+        if isinstance(row, dict):
+            row_fields = row
+        elif isinstance(row, list):
+            for field_name, value in zip(fields, row):
+                row_fields[str(field_name)] = value
+        parsed.append({"record_id": record_id, "fields": row_fields})
+    return parsed
 
 
 def clean_row_for_base(row: dict[str, Any]) -> dict[str, Any]:
@@ -910,17 +912,13 @@ async def upsert_rows(client: FeishuBaseV3, table_id: str, key_field: str, rows:
             updates.append({"record_id": existing_id, "fields": fields})
         else:
             creates.append({"fields": fields})
-    for chunk in chunks(updates, 500):
-        await client.batch_update_records(table_id, chunk)
-        counts["updated"] += len(chunk)
-    for chunk in chunks(creates, 500):
-        await client.batch_create_records(table_id, chunk)
-        counts["created"] += len(chunk)
+    for item in updates:
+        await client.update_record(table_id, item["record_id"], item["fields"])
+        counts["updated"] += 1
+    for item in creates:
+        await client.create_record(table_id, item["fields"])
+        counts["created"] += 1
     return counts
-
-
-def chunks(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
-    return [items[index : index + size] for index in range(0, len(items), size)]
 
 
 async def run_social_crm_p0_sync(req: SocialCrmP0SyncRequest, settings: Settings) -> dict[str, Any]:

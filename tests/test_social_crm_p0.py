@@ -1,6 +1,6 @@
 import unittest
 
-from app.social_crm_p0 import fallback_platform_part, upsert_rows
+from app.social_crm_p0 import fallback_platform_part, parse_base_v3_records_page, upsert_rows
 
 
 class SocialCrmP0FallbackTest(unittest.TestCase):
@@ -22,17 +22,17 @@ class FakeBaseClient:
     async def list_records(self, table_id):
         return [{"record_id": "rec_existing", "fields": {"同步键": "existing"}}]
 
-    async def batch_update_records(self, table_id, records):
-        self.updated.extend(records)
-        return records
+    async def update_record(self, table_id, record_id, fields):
+        self.updated.append({"record_id": record_id, "fields": fields})
+        return {"record_id": record_id, "fields": fields}
 
-    async def batch_create_records(self, table_id, records):
-        self.created.extend(records)
-        return records
+    async def create_record(self, table_id, fields):
+        self.created.append({"fields": fields})
+        return {"record_id": "rec_new", "fields": fields}
 
 
 class SocialCrmP0UpsertTest(unittest.IsolatedAsyncioTestCase):
-    async def test_upsert_uses_batch_create_and_update(self):
+    async def test_upsert_updates_existing_and_creates_missing(self):
         client = FakeBaseClient()
 
         counts = await upsert_rows(
@@ -49,6 +49,21 @@ class SocialCrmP0UpsertTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({"created": 1, "updated": 1, "planned": 2}, counts)
         self.assertEqual("rec_existing", client.updated[0]["record_id"])
         self.assertEqual("POWKONG", client.created[0]["fields"]["品牌"])
+
+
+class SocialCrmP0BaseV3ParseTest(unittest.TestCase):
+    def test_parse_base_v3_records_page_field_matrix_shape(self):
+        records = parse_base_v3_records_page(
+            {
+                "fields": ["同步键", "品牌"],
+                "record_id_list": ["rec1", "rec2"],
+                "data": [["key1", ["FUNLAB"]], ["key2", ["POWKONG"]]],
+            }
+        )
+
+        self.assertEqual("rec1", records[0]["record_id"])
+        self.assertEqual("key1", records[0]["fields"]["同步键"])
+        self.assertEqual(["POWKONG"], records[1]["fields"]["品牌"])
 
 
 if __name__ == "__main__":
