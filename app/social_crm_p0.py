@@ -855,6 +855,26 @@ class FeishuBaseV3:
         )
         return data.get("data", {})
 
+    async def batch_create_records(self, table_id: str, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not records:
+            return []
+        data = await self.request(
+            "POST",
+            f"/bitable/v1/apps/{self.base_token}/tables/{table_id}/records/batch_create",
+            json={"records": records},
+        )
+        return data.get("data", {}).get("records", [])
+
+    async def batch_update_records(self, table_id: str, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not records:
+            return []
+        data = await self.request(
+            "POST",
+            f"/bitable/v1/apps/{self.base_token}/tables/{table_id}/records/batch_update",
+            json={"records": records},
+        )
+        return data.get("data", {}).get("records", [])
+
     async def update_record(self, table_id: str, record_id: str, fields: dict[str, Any]) -> dict[str, Any]:
         data = await self.request(
             "PUT",
@@ -878,6 +898,8 @@ async def upsert_rows(client: FeishuBaseV3, table_id: str, key_field: str, rows:
         key = fields.get(key_field)
         if isinstance(key, str) and key:
             mapping[key] = record.get("record_id", "")
+    creates: list[dict[str, Any]] = []
+    updates: list[dict[str, Any]] = []
     for row in rows:
         key = row.get(key_field)
         if not key:
@@ -885,16 +907,20 @@ async def upsert_rows(client: FeishuBaseV3, table_id: str, key_field: str, rows:
         fields = clean_row_for_base(row)
         existing_id = mapping.get(str(key))
         if existing_id:
-            await client.update_record(table_id, existing_id, fields)
-            counts["updated"] += 1
+            updates.append({"record_id": existing_id, "fields": fields})
         else:
-            result = await client.create_record(table_id, fields)
-            counts["created"] += 1
-            record = result.get("record") or {}
-            new_id = record.get("record_id") or result.get("record_id")
-            if new_id:
-                mapping[str(key)] = new_id
+            creates.append({"fields": fields})
+    for chunk in chunks(updates, 500):
+        await client.batch_update_records(table_id, chunk)
+        counts["updated"] += len(chunk)
+    for chunk in chunks(creates, 500):
+        await client.batch_create_records(table_id, chunk)
+        counts["created"] += len(chunk)
     return counts
+
+
+def chunks(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
+    return [items[index : index + size] for index in range(0, len(items), size)]
 
 
 async def run_social_crm_p0_sync(req: SocialCrmP0SyncRequest, settings: Settings) -> dict[str, Any]:
