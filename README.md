@@ -129,6 +129,11 @@ Operational fixes:
   - Fix: IG media insights metric now uses Meta official `saved` metric name instead of `saves`; `/insights/poll` falls back from `Meta Page Post ID` to `FB Photo ID` / `平台返回ID`, ignores null-like platform IDs (`None`/`null`/`nan`), and catches `MetaApiError` as a structured blocked result.
   - Verification: `tests/test_meta_client.py` passed 5 tests, `py_compile` passed for `app/main.py` and `app/meta_client.py`, commits `cd9f68c` and `f871204` were deployed, and post-deploy four-account evidence was written to `D:\Documents\社交媒体\fbig_evidence\meta_p0_permissions_20260720\insights_poll_four_accounts_after_f871204_20260720.json`.
   - Remaining permission gap: to mark Meta insights P0 complete, request/confirm `instagram_manage_insights` for IG, refresh/confirm valid Facebook Page access tokens/object access, and add a reliable Facebook Page post-ID or Page/photo insights path. Do not mix this with Meta Ads permissions.
+- 2026-07-21 IG Feed caption/hashtag P0:
+  - Problem: Instagram publish commit used only `Caption EN`, so `Hashtag EN` could pass dry-run context but be omitted from the real post caption.
+  - Fix: publish validation now builds `publish_caption` from `Caption EN` plus non-duplicate `Hashtag EN`; Instagram length and block-term checks run against this final string, and commit sends `publish_caption` to Meta.
+  - Verification: local full `unittest discover -s tests` passed 118 tests before deploy; targeted tests cover hashtag append, duplicate suppression, Instagram 2200-character limit including hashtags, and block-term detection in hashtags.
+  - Safety: no already published IG post was edited; real publishing still requires `SOCIAL_PUBLISH_COMMIT_ENABLED=true` and a single-record commit authorization.
 - 2026-07-15 FB/IG daily confirm writeback:
   - Problem: Feishu daily confirm card clicks returned failure cards and did not create content-calendar rows.
   - Root cause: Base datetime fields rejected numeric millisecond strings, number fields could receive string values, and legacy weekly-pool pillar `UGC` did not match the content-calendar option `UGC/KOL社证`.

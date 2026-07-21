@@ -127,6 +127,36 @@ def multi_value(value: Any) -> list[str]:
     return [item.strip() for item in re.split(r"[,;/\n]+", raw) if item.strip()]
 
 
+def _hashtag_tokens(value: Any) -> list[str]:
+    raw = text_value(value)
+    if not raw:
+        return []
+    tokens: list[str] = []
+    for part in re.split(r"[\s,;，；]+", raw):
+        tag = part.strip()
+        if not tag:
+            continue
+        if not tag.startswith("#"):
+            tag = "#" + tag.lstrip("#")
+        if tag not in tokens:
+            tokens.append(tag)
+    return tokens
+
+
+def build_publish_caption(fields: dict[str, Any]) -> str:
+    caption = text_value(fields.get("Caption EN"))
+    hashtags = _hashtag_tokens(fields.get("Hashtag EN"))
+    if not hashtags:
+        return caption
+    caption_lower = caption.lower()
+    missing = [tag for tag in hashtags if tag.lower() not in caption_lower]
+    if not missing:
+        return caption
+    suffix = " ".join(missing)
+    if not caption:
+        return suffix
+    return f"{caption}\n\n{suffix}"
+
 def bool_value(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -320,13 +350,17 @@ def validate_publish(
     normalized["experiment"] = exp
 
     caption = text_value(fields.get("Caption EN"))
+    final_caption = build_publish_caption(fields)
+    normalized["caption"] = caption
+    normalized["hashtags"] = " ".join(_hashtag_tokens(fields.get("Hashtag EN")))
+    normalized["publish_caption"] = final_caption
     if not caption:
         error("CAPTION_MISSING", "Caption EN 不能为空")
-    elif len(caption) > 2200 and account and account.platform == PLATFORM_INSTAGRAM:
+    elif len(final_caption) > 2200 and account and account.platform == PLATFORM_INSTAGRAM:
         error("CAPTION_TOO_LONG", "Instagram caption 超过 2200 字符")
     for term in GENERAL_BLOCK_TERMS:
-        if term in caption.lower():
-            error("CAPTION_BLOCK_TERM", f"Caption 命中禁用/高风险词：{term}")
+        if term in final_caption.lower():
+            error("CAPTION_BLOCK_TERM", f"Caption/Hashtag 命中禁用/高风险词：{term}")
 
     slots = multi_value(fields.get("发布位置"))
     if not slots:

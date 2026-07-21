@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from app.rules import AccountConfig, validate_publish
+from app.rules import AccountConfig, build_publish_caption, validate_publish
 
 
 def account(**overrides):
@@ -47,6 +47,48 @@ class PublishRulesTest(unittest.TestCase):
     def test_valid_single_image(self):
         result = validate_publish(fields(), account(), now=datetime(2026, 7, 1, 10, 1, tzinfo=timezone.utc), commit=True)
         self.assertTrue(result.ok, result.blocking)
+
+    def test_publish_caption_appends_hashtag_en_to_normalized(self):
+        record = fields(**{"Hashtag EN": "#Powkong #DockGen2 #GamingSetup"})
+        result = validate_publish(record, account(), now=datetime(2026, 7, 1, 10, 1, tzinfo=timezone.utc), commit=True)
+        self.assertTrue(result.ok, result.blocking)
+        self.assertEqual(result.normalized["caption"], "Make your setup brighter with a compact Switch accessory.")
+        self.assertEqual(result.normalized["hashtags"], "#Powkong #DockGen2 #GamingSetup")
+        self.assertEqual(
+            result.normalized["publish_caption"],
+            "Make your setup brighter with a compact Switch accessory.\n\n#Powkong #DockGen2 #GamingSetup",
+        )
+        self.assertEqual(build_publish_caption(record), result.normalized["publish_caption"])
+
+    def test_publish_caption_does_not_duplicate_existing_hashtag(self):
+        result = validate_publish(
+            fields(**{"Caption EN": "Already in the caption. #Powkong", "Hashtag EN": "#Powkong #DockGen2"}),
+            account(),
+            now=datetime(2026, 7, 1, 10, 1, tzinfo=timezone.utc),
+            commit=True,
+        )
+        self.assertTrue(result.ok, result.blocking)
+        self.assertEqual(result.normalized["publish_caption"], "Already in the caption. #Powkong\n\n#DockGen2")
+
+    def test_instagram_caption_length_counts_hashtags(self):
+        result = validate_publish(
+            fields(**{"Caption EN": "a" * 2199, "Hashtag EN": "#xy"}),
+            account(),
+            now=datetime(2026, 7, 1, 10, 1, tzinfo=timezone.utc),
+            commit=True,
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("CAPTION_TOO_LONG", [issue.code for issue in result.blocking])
+
+    def test_caption_block_terms_include_hashtags(self):
+        result = validate_publish(
+            fields(**{"Hashtag EN": "#Mario"}),
+            account(),
+            now=datetime(2026, 7, 1, 10, 1, tzinfo=timezone.utc),
+            commit=True,
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("CAPTION_BLOCK_TERM", [issue.code for issue in result.blocking])
 
     def test_missing_approval_blocks(self):
         result = validate_publish(fields(**{"审批通过": False}), account(), commit=True)

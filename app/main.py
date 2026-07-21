@@ -2280,8 +2280,7 @@ async def _execute_publish(req: PublishRequest, *, commit: bool, settings: Setti
         return {"ok": False, "status": "blocked", "run_id": run_id, "blocking": [{"code": "META_TOKEN_MISSING"}]}
 
     assert account is not None
-    fields = record.get("fields", record)
-    caption = str(fields.get("Caption EN", "")).strip()
+    caption = str(validation.normalized.get("publish_caption") or "").strip()
     asset_urls, prepare_error = await _prepare_asset_urls_for_commit(
         settings=settings,
         account=account,
