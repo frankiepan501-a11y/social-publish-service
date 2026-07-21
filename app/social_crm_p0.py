@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from datetime import datetime, timedelta, timezone
 import json
@@ -119,6 +120,15 @@ def load_env_json(raw: str, label: str) -> dict[str, Any]:
         raise SocialCrmSyncError(f"{label} is not valid JSON") from exc
 
 
+def part_timeout_seconds() -> float:
+    raw = os.getenv("SOCIAL_CRM_P0_PART_TIMEOUT_SECONDS", "70")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 70.0
+    return max(10.0, min(value, 120.0))
+
+
 async def request_json(
     method: str,
     url: str,
@@ -167,8 +177,6 @@ async def request_json_with_retry(url: str, *, attempts: int = 3, sleep_seconds:
 
 
 async def sleep(seconds: float) -> None:
-    import asyncio
-
     await asyncio.sleep(seconds)
 
 
@@ -892,18 +900,21 @@ async def upsert_rows(client: FeishuBaseV3, table_id: str, key_field: str, rows:
 async def run_social_crm_p0_sync(req: SocialCrmP0SyncRequest, settings: Settings) -> dict[str, Any]:
     parts: list[tuple[str, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]] = []
     errors: list[str] = []
-    for name, skip, func in (
+    jobs = [
+        (name, func)
+        for name, skip, func in (
         ("meta", req.skip_meta, lambda: meta_sync(settings, req.window)),
         ("youtube", req.skip_youtube, lambda: youtube_sync(settings)),
         ("x", req.skip_x, lambda: x_sync(settings)),
-    ):
-        if skip:
-            continue
-        try:
-            rows, summaries, evidence = await func()
+        )
+        if not skip
+    ]
+    if jobs:
+        results = await asyncio.gather(*(run_part_with_timeout(name, func) for name, func in jobs))
+        for name, rows, summaries, evidence, error in results:
             parts.append((name, rows, summaries, evidence))
-        except Exception as exc:
-            errors.append(f"{name}: {compact_error(exc)}")
+            if error:
+                errors.append(error)
 
     rows: list[dict[str, Any]] = []
     summaries_by_key: dict[str, dict[str, Any]] = {}
@@ -946,3 +957,52 @@ async def run_social_crm_p0_sync(req: SocialCrmP0SyncRequest, settings: Settings
         "errors": errors,
         "evidence": evidence,
     }
+
+
+async def run_part_with_timeout(
+    name: str,
+    func: Any,
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], str | None]:
+    timeout = part_timeout_seconds()
+    try:
+        rows, summaries, evidence = await asyncio.wait_for(func(), timeout=timeout)
+        return name, rows, summaries, evidence, None
+    except asyncio.TimeoutError:
+        error = f"{name}: 单平台只读同步超过 {timeout:g}s，已写入 blocker，避免整次 daily 任务卡死"
+        rows, summaries, evidence = fallback_platform_part(name, error)
+        return name, rows, summaries, evidence, error
+    except Exception as exc:
+        error = f"{name}: {compact_error(exc)}"
+        rows, summaries, evidence = fallback_platform_part(name, error)
+        return name, rows, summaries, evidence, error
+
+
+def fallback_platform_part(
+    name: str,
+    message: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    checked_at = format_datetime()
+    rows: list[dict[str, Any]] = []
+    if name == "meta":
+        for item in META_RECORDS:
+            rows.append(meta_row(item, checked_at, {}, False, "blocker", message))
+    elif name == "youtube":
+        for account in (
+            {"brand": "FUNLAB", "account": "@funlabswitch"},
+            {"brand": "POWKONG", "account": "@POWKONG"},
+        ):
+            rows.append(youtube_status_row(account, checked_at, "blocker", message))
+    elif name == "x":
+        for account in (
+            {"brand": "FUNLAB", "expected_username": "Funlab_switch"},
+            {"brand": "POWKONG", "expected_username": "POWKONGkong"},
+        ):
+            rows.append(x_status_row(account, {}, checked_at, "blocker", message))
+
+    evidence = {
+        "checked_at": checked_at,
+        "source": f"{name} fallback blocker",
+        "safe_output": True,
+        "error": message,
+    }
+    return rows, build_platform_summaries(rows, "cloud:social-crm-p0"), evidence
