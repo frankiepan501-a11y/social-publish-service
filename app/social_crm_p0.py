@@ -804,13 +804,19 @@ class FeishuBaseV3:
 
     async def request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
         token = await self.token()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.request(
-                method,
-                f"{self._base}{path}",
-                headers={"Authorization": f"Bearer {token}"},
-                **kwargs,
-            )
+        timeout = httpx.Timeout(12.0, connect=5.0, read=12.0, write=12.0, pool=5.0)
+        try:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+                resp = await client.request(
+                    method,
+                    f"{self._base}{path}",
+                    headers={"Authorization": f"Bearer {token}"},
+                    **kwargs,
+                )
+        except httpx.TimeoutException as exc:
+            raise SocialCrmSyncError(f"Feishu Base API timeout: {method} {path}") from exc
+        except httpx.HTTPError as exc:
+            raise SocialCrmSyncError(f"Feishu Base API request failed: {method} {path}: {compact_error(exc)}") from exc
         try:
             data = resp.json() if resp.content else {}
         except json.JSONDecodeError:
@@ -856,7 +862,7 @@ def clean_row_for_base(row: dict[str, Any]) -> dict[str, Any]:
 
 async def upsert_rows(client: FeishuBaseV3, table_id: str, key_field: str, rows: list[dict[str, Any]], commit: bool) -> dict[str, int]:
     counts = {"created": 0, "updated": 0, "planned": len(rows)}
-    if not commit:
+    if not commit or not rows:
         return counts
     mapping: dict[str, str] = {}
     for record in await client.list_records(table_id):
@@ -922,8 +928,11 @@ async def run_social_crm_p0_sync(req: SocialCrmP0SyncRequest, settings: Settings
             settings.feishu_bitable_app_secret,
             settings.social_crm_p0_base_token,
         )
-        post_counts = await upsert_rows(client, settings.social_crm_p0_post_table_id, "同步键", rows, True)
-        snapshot_counts = await upsert_rows(client, settings.social_crm_p0_snapshot_table_id, "快照键", summaries, True)
+        try:
+            post_counts = await upsert_rows(client, settings.social_crm_p0_post_table_id, "同步键", rows, True)
+            snapshot_counts = await upsert_rows(client, settings.social_crm_p0_snapshot_table_id, "快照键", summaries, True)
+        except Exception as exc:
+            errors.append(f"base-write: {compact_error(exc)}")
 
     return {
         "ok": not errors,
