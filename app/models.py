@@ -218,6 +218,15 @@ class ReplayRequest(BaseModel):
     mode: Literal["dry-run", "commit"] = "dry-run"
 
 
+class SocialCrmP0SyncRequest(BaseModel):
+    commit: bool = False
+    source: Literal["auto", "manual", "replay"] = "auto"
+    window: str = "7d"
+    skip_meta: bool = False
+    skip_youtube: bool = False
+    skip_x: bool = False
+
+
 class InsightsPollRequest(BaseModel):
     record_id: str | None = None
     record: dict[str, Any] | None = None

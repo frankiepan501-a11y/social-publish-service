@@ -48,6 +48,7 @@ from .meta_client import MetaApiError, MetaClient
 from .models import ApprovalActionRequest, ApprovalCardPreviewRequest
 from .models import GenerateBriefRequest, GenerateScanRequest, InsightsPollRequest, PublishRequest, PublishScanRequest, ReplayRequest
 from .models import PlanDailyConfirmRequest, PlanReselectRequest, PlanWeeklyRequest
+from .models import SocialCrmP0SyncRequest
 from .models import (
     KolActionRequest,
     KolVisualPostDiscoveryRequest,
@@ -82,6 +83,7 @@ from .rules import (
     select_value,
     text_value,
 )
+from .social_crm_p0 import run_social_crm_p0_sync
 
 
 app = FastAPI(title="social-publish-service", version="0.1.0")
@@ -2827,9 +2829,23 @@ async def health(settings: Settings = Depends(get_settings)):
         "product_index_configured": bool(settings.product_index_table_id),
         "kol_candidate_configured": bool(settings.kol_candidate_table_id),
         "meta_configured": settings.meta_enabled(),
+        "social_crm_p0_base_configured": settings.social_crm_p0_base_enabled(),
+        "social_crm_p0_write_enabled": settings.social_crm_p0_write_enabled,
+        "social_crm_p0_youtube_configured": settings.social_crm_p0_youtube_enabled(),
+        "social_crm_p0_x_configured": settings.social_crm_p0_x_enabled(),
         "generation_ai_provider": settings.generation_ai_provider,
         "generation_ai_configured": settings.generation_ai_enabled(),
     }
+
+
+@app.post("/social-crm-p0/sync")
+async def social_crm_p0_sync(
+    req: SocialCrmP0SyncRequest,
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+):
+    _check_auth(settings, authorization)
+    return await run_social_crm_p0_sync(req, settings)
 
 
 @app.post("/plan/weekly")

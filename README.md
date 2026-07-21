@@ -101,7 +101,23 @@ Replay:
 - `spv1-*` replays publish validation; `mode=commit` is still gated by record state, account config, Meta env, and `SOCIAL_PUBLISH_COMMIT_ENABLED`.
 - Generation replay is dry-run only. It cannot approve, confirm assets, publish, or write fields back.
 
+Social CRM P0 sync:
+- `POST /social-crm-p0/sync`
+- Purpose: daily read-only sync for the Feishu Base `Social CRM P0 工作台`. It reads Meta, YouTube, and X account/post data and can upsert sanitized rows into `发帖记录同步` and `周报快照`.
+- Safety: the endpoint never posts, uploads media, replies to comments, sends DMs, or changes ads. `commit=true` only controls Feishu Base writeback. Real Base writes require both `commit=true` and `SOCIAL_CRM_P0_WRITE_ENABLED=true`.
+- Default request for n8n cron: `{"commit":true,"source":"auto","window":"7d"}`. Use `skip_meta`, `skip_youtube`, or `skip_x` to isolate one platform during smoke tests.
+- Meta: reuses this service's existing Meta environment and calls `/insights/poll` internally for the known P0 record samples.
+- YouTube: uses OAuth token JSON stored in Zeabur environment variables. It refreshes access tokens in memory for each run and reads channel, recent videos, and basic analytics only.
+- X: uses OAuth 2.0 user-context credentials stored in Zeabur environment variables. It refreshes access tokens, reads user identity and recent original posts, and retries short-lived 429/5xx errors. Rotated token JSON is persisted only to the runtime path `SOCIAL_CRM_X_TOKEN_PERSIST_PATH`; move it to a durable secret store later if daily jobs must survive container rebuilds without reusing the original refresh token.
+- Feishu blocker to watch: the Base writing app must have the newer Base scopes for `base:field:read`, `base:record:read`, `base:record:create`, and `base:record:update`, and must be a collaborator on `Social CRM P0 工作台`. Without those scopes the endpoint can read platforms but cannot write P0 Base rows.
+- Do not put token values, client secrets, passwords, or authorization headers into Base, README, n8n node notes, or execution logs.
+
 Operational fixes:
+- 2026-07-21 Social CRM P0 cloud sync endpoint:
+  - Problem: the local P0 script could sync Meta / YouTube / X into Feishu Base, but daily cloud execution was still missing a stable webhook endpoint and Zeabur environment-variable contract.
+  - Fix: added `/social-crm-p0/sync`, P0-specific config flags, YouTube and X OAuth refresh/read paths, sanitized Feishu Base v3 upsert logic, and health flags for P0 Base / YouTube / X configuration.
+  - Safety: endpoint has no social-platform write actions; Base writeback is blocked unless `SOCIAL_CRM_P0_WRITE_ENABLED=true`. Token strings are redacted from error messages and are not returned in API evidence.
+  - Verification: `py_compile` passed for touched modules; local full `unittest discover -s tests -v` passed 126 tests with service-token and live-AI environment variables cleared/forced to template for deterministic local auth.
 - 2026-07-20 Carousel approval regeneration and product-asset mapping hardening:
   - Problem: clicking `重生图片` on a Carousel approval card could call the generic single-image approval-regeneration path, creating one image task and potentially reusing a weak generic product-library `image.png` instead of the maintained design-asset source.
   - Fix: `/approval/action` now detects Carousel content and routes `regenerate_image` / `regenerate_both` with `create_image_task=true` to a dedicated two-slide task builder. Image regeneration also clears stale Carousel tokens and public URLs. Product-reference selection now recognizes stable asset fields such as `产品资产目录`, `产品正面主图`, and `产品细节图` before generic fallback fields.
@@ -195,6 +211,19 @@ Required environment for production:
 - `GENERATION_AI_API_KEY`
 - `GENERATION_AI_MODEL`
 - `GENERATION_AI_TIMEOUT_SECONDS`
+- `SOCIAL_CRM_P0_WRITE_ENABLED`
+- `SOCIAL_CRM_P0_BASE_TOKEN`
+- `SOCIAL_CRM_P0_POST_TABLE_ID`
+- `SOCIAL_CRM_P0_SNAPSHOT_TABLE_ID`
+- `SOCIAL_CRM_META_SERVICE_URL`
+- `SOCIAL_CRM_YOUTUBE_OAUTH_CLIENT_JSON`
+- `SOCIAL_CRM_YOUTUBE_TOKEN_FUNLAB_JSON`
+- `SOCIAL_CRM_YOUTUBE_TOKEN_POWKONG_JSON`
+- `SOCIAL_CRM_X_CLIENT_FUNLAB_JSON`
+- `SOCIAL_CRM_X_TOKEN_FUNLAB_JSON`
+- `SOCIAL_CRM_X_CLIENT_POWKONG_JSON`
+- `SOCIAL_CRM_X_TOKEN_POWKONG_JSON`
+- `SOCIAL_CRM_X_TOKEN_PERSIST_PATH`
 
 Local check:
 

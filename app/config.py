@@ -45,6 +45,22 @@ class Settings:
     product_library_base_token: str = os.getenv("FEISHU_PRODUCT_LIBRARY_BASE_TOKEN", "MvtZb6OE9aJFaisO913cWSErnFe")
     product_powkong_table_id: str = os.getenv("FEISHU_PRODUCT_POWKONG_TABLE_ID", "tblBCI4QaOZAgv3r")
     product_funlab_table_id: str = os.getenv("FEISHU_PRODUCT_FUNLAB_TABLE_ID", "tblwJ3BRkIuHDuSK")
+    social_crm_p0_write_enabled: bool = env_bool("SOCIAL_CRM_P0_WRITE_ENABLED", False)
+    social_crm_p0_base_token: str = os.getenv("SOCIAL_CRM_P0_BASE_TOKEN", "Zai5bH4RdasnLWsCU9ecB7tEnSb")
+    social_crm_p0_post_table_id: str = os.getenv("SOCIAL_CRM_P0_POST_TABLE_ID", "tblCLfsU9oTcyaRz")
+    social_crm_p0_snapshot_table_id: str = os.getenv("SOCIAL_CRM_P0_SNAPSHOT_TABLE_ID", "tblknQFFK8rf5YeW")
+    social_crm_meta_service_url: str = os.getenv(
+        "SOCIAL_CRM_META_SERVICE_URL",
+        os.getenv("SOCIAL_PUBLISH_SERVICE_URL", "https://fb-ig-social-publish.zeabur.app"),
+    )
+    social_crm_youtube_oauth_client_json: str = os.getenv("SOCIAL_CRM_YOUTUBE_OAUTH_CLIENT_JSON", "")
+    social_crm_youtube_token_funlab_json: str = os.getenv("SOCIAL_CRM_YOUTUBE_TOKEN_FUNLAB_JSON", "")
+    social_crm_youtube_token_powkong_json: str = os.getenv("SOCIAL_CRM_YOUTUBE_TOKEN_POWKONG_JSON", "")
+    social_crm_x_client_funlab_json: str = os.getenv("SOCIAL_CRM_X_CLIENT_FUNLAB_JSON", "")
+    social_crm_x_token_funlab_json: str = os.getenv("SOCIAL_CRM_X_TOKEN_FUNLAB_JSON", "")
+    social_crm_x_client_powkong_json: str = os.getenv("SOCIAL_CRM_X_CLIENT_POWKONG_JSON", "")
+    social_crm_x_token_powkong_json: str = os.getenv("SOCIAL_CRM_X_TOKEN_POWKONG_JSON", "")
+    social_crm_x_token_persist_path: str = os.getenv("SOCIAL_CRM_X_TOKEN_PERSIST_PATH", "/tmp/social_crm_x_tokens.json")
 
     generation_ai_provider: str = os.getenv("GENERATION_AI_PROVIDER", "template")
     generation_ai_base_url: str = os.getenv("GENERATION_AI_BASE_URL", "https://api.deepseek.com")
@@ -77,6 +93,30 @@ class Settings:
 
     def product_library_enabled(self) -> bool:
         return bool(self.feishu_app_id and self.feishu_app_secret and self.product_library_base_token)
+
+    def social_crm_p0_base_enabled(self) -> bool:
+        return bool(
+            self.feishu_bitable_app_id
+            and self.feishu_bitable_app_secret
+            and self.social_crm_p0_base_token
+            and self.social_crm_p0_post_table_id
+            and self.social_crm_p0_snapshot_table_id
+        )
+
+    def social_crm_p0_youtube_enabled(self) -> bool:
+        return bool(
+            self.social_crm_youtube_oauth_client_json
+            and self.social_crm_youtube_token_funlab_json
+            and self.social_crm_youtube_token_powkong_json
+        )
+
+    def social_crm_p0_x_enabled(self) -> bool:
+        return bool(
+            self.social_crm_x_client_funlab_json
+            and self.social_crm_x_token_funlab_json
+            and self.social_crm_x_client_powkong_json
+            and self.social_crm_x_token_powkong_json
+        )
 
 
 def get_settings() -> Settings:
