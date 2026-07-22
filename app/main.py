@@ -75,6 +75,7 @@ from .rules import (
     MODE_AUTO,
     PLATFORM_FACEBOOK,
     PLATFORM_INSTAGRAM,
+    ValidationIssue,
     collect_single_asset_file_tokens,
     parse_file_tokens,
     validate_publish,
@@ -118,6 +119,187 @@ def _safe_error_text(value: Any, limit: int = 260) -> str:
     text = re.sub(r'"refresh_token"\s*:\s*"[^"]+"', '"refresh_token":"[redacted]"', text, flags=re.I)
     text = re.sub(r'"client_secret"\s*:\s*"[^"]+"', '"client_secret":"[redacted]"', text, flags=re.I)
     return text[:limit]
+
+
+def _id_suffix(value: Any) -> str:
+    raw = text_value(value)
+    return raw[-5:] if raw else ""
+
+
+def _meta_issue(code: str, message: str, *, meta_error_code: str = "") -> dict[str, str]:
+    issue = {"code": code, "message": message}
+    if meta_error_code:
+        issue["meta_error_code"] = meta_error_code
+    return issue
+
+
+def _normalize_ig_limit(payload: dict[str, Any]) -> dict[str, Any]:
+    item: dict[str, Any] = {}
+    data = payload.get("data")
+    if isinstance(data, list) and data:
+        first = data[0]
+        item = first if isinstance(first, dict) else {}
+    elif isinstance(data, dict):
+        item = data
+    else:
+        item = payload
+    config = item.get("config") if isinstance(item.get("config"), dict) else {}
+    quota_usage = item.get("quota_usage", payload.get("quota_usage", 0))
+    quota_total = item.get("quota_total", config.get("quota_total", payload.get("quota_total", 0)))
+    return {"quota_usage": quota_usage or 0, "quota_total": quota_total or 0}
+
+
+def _scopes_from_debug(payload: dict[str, Any]) -> list[str]:
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    scopes = data.get("scopes")
+    if not isinstance(scopes, list):
+        return []
+    return [text_value(scope) for scope in scopes if text_value(scope)]
+
+
+async def _meta_publish_preflight(
+    *,
+    settings: Settings,
+    account: AccountConfig | None,
+    access_token: str,
+) -> dict[str, Any]:
+    if account is None:
+        return {"ok": True, "status": "skipped", "reason": "account_missing"}
+    if account.platform not in {PLATFORM_FACEBOOK, PLATFORM_INSTAGRAM}:
+        return {"ok": True, "status": "skipped", "reason": "non_meta_platform"}
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "status": "pass",
+        "platform": account.platform,
+        "account": account.account_name,
+        "brand": account.brand,
+        "checks": {},
+        "warnings": [],
+        "blocking": [],
+    }
+    if not access_token:
+        result["ok"] = False
+        result["status"] = "blocked"
+        result["blocking"].append(_meta_issue("META_TOKEN_MISSING", "Meta token is missing for this brand/account."))
+        return result
+
+    meta = MetaClient(access_token, settings.graph_version)
+    try:
+        debug = await meta.debug_token()
+        scopes = _scopes_from_debug(debug)
+        debug_data = debug.get("data") if isinstance(debug.get("data"), dict) else {}
+        result["checks"]["debug_token"] = {
+            "ok": bool(debug_data.get("is_valid", True)),
+            "type": text_value(debug_data.get("type")),
+            "app_id": text_value(debug_data.get("app_id")),
+            "profile_id_suffix": _id_suffix(debug_data.get("profile_id")),
+            "scopes": scopes,
+        }
+        if debug_data.get("is_valid") is False:
+            result["blocking"].append(_meta_issue("META_TOKEN_INVALID", "Meta token debug says this token is not valid."))
+    except MetaApiError as exc:
+        result["blocking"].append(
+            _meta_issue(
+                "META_DEBUG_FAILED",
+                f"Meta token debug failed: {_safe_error_text(exc)}",
+                meta_error_code=exc.code,
+            )
+        )
+
+    page = None
+    try:
+        page = await meta.page_self(include_instagram=True)
+    except MetaApiError as exc:
+        result["warnings"].append(
+            _meta_issue(
+                "META_PAGE_IG_FIELD_UNAVAILABLE",
+                "Could not read instagram_business_account from /me; falling back to Page id/name plus configured IG user id.",
+                meta_error_code=exc.code,
+            )
+        )
+        try:
+            page = await meta.page_self(include_instagram=False)
+        except MetaApiError as page_exc:
+            result["blocking"].append(
+                _meta_issue(
+                    "META_PAGE_SELF_FAILED",
+                    f"Meta Page token /me failed: {_safe_error_text(page_exc)}",
+                    meta_error_code=page_exc.code,
+                )
+            )
+
+    if isinstance(page, dict):
+        page_id = text_value(page.get("id"))
+        page_name = text_value(page.get("name"))
+        page_ig = page.get("instagram_business_account") if isinstance(page.get("instagram_business_account"), dict) else {}
+        page_ig_id = text_value(page_ig.get("id"))
+        result["checks"]["page_self"] = {
+            "ok": True,
+            "page_id_suffix": _id_suffix(page_id),
+            "page_name": page_name,
+            "ig_user_id_suffix": _id_suffix(page_ig_id),
+            "ig_username": text_value(page_ig.get("username")),
+        }
+        if account.meta_page_id and page_id and page_id != account.meta_page_id:
+            result["blocking"].append(
+                _meta_issue(
+                    "META_PAGE_ID_MISMATCH",
+                    "Meta token points to a different Page than the account config. Refresh the account table Page ID or use the correct brand token.",
+                )
+            )
+        if account.platform == PLATFORM_FACEBOOK and not (account.meta_page_id or page_id):
+            result["blocking"].append(_meta_issue("META_PAGE_ID_MISSING", "Facebook publishing requires a Page ID."))
+    else:
+        page_ig_id = ""
+
+    if account.platform == PLATFORM_INSTAGRAM:
+        target_ig_id = account.ig_user_id or page_ig_id
+        if page_ig_id and account.ig_user_id and page_ig_id != account.ig_user_id:
+            result["blocking"].append(
+                _meta_issue(
+                    "META_IG_USER_ID_MISMATCH",
+                    "Meta token's linked Instagram account differs from the account config. Refresh the configured Instagram User ID.",
+                )
+            )
+        if not target_ig_id:
+            result["blocking"].append(
+                _meta_issue("META_IG_USER_ID_MISSING", "Instagram publishing requires an Instagram User ID.")
+            )
+        else:
+            try:
+                ig_basic = await meta.instagram_user_basic(target_ig_id)
+                result["checks"]["ig_basic"] = {
+                    "ok": True,
+                    "ig_user_id_suffix": _id_suffix(ig_basic.get("id")),
+                    "username": text_value(ig_basic.get("username")),
+                    "media_count": ig_basic.get("media_count", 0),
+                }
+            except MetaApiError as exc:
+                result["blocking"].append(
+                    _meta_issue(
+                        "META_IG_BASIC_FAILED",
+                        f"Instagram User basic read failed: {_safe_error_text(exc)}",
+                        meta_error_code=exc.code,
+                    )
+                )
+            try:
+                limit = _normalize_ig_limit(await meta.content_publishing_limit(target_ig_id))
+                result["checks"]["ig_content_publishing_limit"] = {"ok": True, **limit}
+                result["ig_limit"] = limit
+            except MetaApiError as exc:
+                result["blocking"].append(
+                    _meta_issue(
+                        "META_IG_LIMIT_FAILED",
+                        f"Instagram content publishing limit read failed: {_safe_error_text(exc)}",
+                        meta_error_code=exc.code,
+                    )
+                )
+
+    if result["blocking"]:
+        result["ok"] = False
+        result["status"] = "blocked"
+    return result
 
 
 def _feishu_writeback_detail(exc: FeishuError) -> dict[str, str]:
@@ -2242,24 +2424,60 @@ async def _prepare_asset_urls_for_commit(
     return prepared_urls, None
 
 
-async def _execute_publish(req: PublishRequest, *, commit: bool, settings: Settings) -> dict:
+async def _execute_publish(
+    req: PublishRequest,
+    *,
+    commit: bool,
+    settings: Settings,
+    strict_meta_preflight: bool = False,
+) -> dict:
     record_id, record = await _load_record(req, settings)
     account = await _load_account(req, record, settings)
     recent = await _load_recent_records(req, settings)
     now = _parse_now(req.now)
     run_id = f"spv1-{uuid.uuid4().hex[:16]}"
-    ig_limit = None
     meta_access_token = settings.meta_token_for_brand(account.brand) if account else ""
-
-    if account and account.platform == PLATFORM_INSTAGRAM and meta_access_token:
-        try:
-            ig_limit = await MetaClient(meta_access_token, settings.graph_version).content_publishing_limit(
-                account.ig_user_id
-            )
-        except MetaApiError as exc:
-            ig_limit = {"meta_limit_error": exc.code}
+    meta_preflight = await _meta_publish_preflight(
+        settings=settings,
+        account=account,
+        access_token=meta_access_token,
+    )
+    ig_limit = meta_preflight.get("ig_limit") if meta_preflight.get("ok") else None
 
     validation = validate_publish(record, account, recent, now=now, commit=commit, ig_limit=ig_limit)
+    if not meta_preflight.get("ok") and meta_preflight.get("status") != "skipped":
+        blocking = meta_preflight.get("blocking") or []
+        if strict_meta_preflight and not commit:
+            for item in blocking:
+                if not isinstance(item, dict):
+                    continue
+                validation.blocking.append(
+                    ValidationIssue(
+                        code=text_value(item.get("code")) or "META_PREFLIGHT_FAILED",
+                        message=text_value(item.get("message"))
+                        or "Meta publish preflight failed before social-platform writes.",
+                        level="error",
+                    )
+                )
+            if not blocking:
+                validation.blocking.append(
+                    ValidationIssue(
+                        code="META_PREFLIGHT_FAILED",
+                        message="Meta publish preflight failed before social-platform writes.",
+                        level="error",
+                    )
+                )
+            validation.ok = False
+            validation.decision_reason = "; ".join([issue.code for issue in validation.blocking])
+        else:
+            codes = ",".join([text_value(item.get("code")) for item in blocking if isinstance(item, dict)])
+            validation.warnings.append(
+                ValidationIssue(
+                    code="META_PREFLIGHT_FAILED",
+                    message=f"Meta publish preflight failed before social-platform writes: {codes or 'unknown'}",
+                    level="warning",
+                )
+            )
     mode = "commit" if commit else "dry-run"
     status = "pass" if validation.ok else "blocked"
     await _write_log(
@@ -2275,7 +2493,13 @@ async def _execute_publish(req: PublishRequest, *, commit: bool, settings: Setti
     )
 
     if not validation.ok:
-        return {"ok": False, "status": "blocked", "run_id": run_id, **_safe_issues(validation)}
+        return {
+            "ok": False,
+            "status": "blocked",
+            "run_id": run_id,
+            "meta_preflight": meta_preflight,
+            **_safe_issues(validation),
+        }
     if not commit:
         return {
             "ok": True,
@@ -2283,6 +2507,7 @@ async def _execute_publish(req: PublishRequest, *, commit: bool, settings: Setti
             "run_id": run_id,
             "input_hash": validation.input_hash,
             "normalized": validation.normalized,
+            "meta_preflight": meta_preflight,
             **_safe_issues(validation),
         }
     if not settings.commit_enabled:
@@ -2297,9 +2522,32 @@ async def _execute_publish(req: PublishRequest, *, commit: bool, settings: Setti
             decision_reason="COMMIT_DISABLED",
             mode="commit",
         )
-        return {"ok": False, "status": "blocked", "run_id": run_id, "blocking": [{"code": "COMMIT_DISABLED"}]}
-    if not meta_access_token:
-        return {"ok": False, "status": "blocked", "run_id": run_id, "blocking": [{"code": "META_TOKEN_MISSING"}]}
+        return {
+            "ok": False,
+            "status": "blocked",
+            "run_id": run_id,
+            "meta_preflight": meta_preflight,
+            "blocking": [{"code": "COMMIT_DISABLED"}],
+        }
+    if not meta_preflight.get("ok"):
+        await _write_log(
+            settings,
+            run_id=run_id,
+            record_id=record_id,
+            node="publish/meta-preflight",
+            status="blocked",
+            input_hash=validation.input_hash,
+            output_summary=json.dumps(meta_preflight.get("blocking") or [], ensure_ascii=False),
+            decision_reason="META_PREFLIGHT_FAILED",
+            mode="commit",
+        )
+        return {
+            "ok": False,
+            "status": "blocked",
+            "run_id": run_id,
+            "meta_preflight": meta_preflight,
+            "blocking": meta_preflight.get("blocking") or [{"code": "META_PREFLIGHT_FAILED"}],
+        }
 
     assert account is not None
     caption = str(validation.normalized.get("publish_caption") or "").strip()
@@ -2933,7 +3181,12 @@ async def _execute_social_crm_p1_publish(req: SocialCrmP1PublishRequest, *, comm
             "writeback_hint": social_crm_p1_writeback_hint({"ok": False, "status": "blocked", "blocking": precheck}),
         }
 
-    result = await _execute_publish(publish_req, commit=commit, settings=settings)
+    result = await _execute_publish(
+        publish_req,
+        commit=commit,
+        settings=settings,
+        strict_meta_preflight=True,
+    )
     result["social_crm_p1"] = {
         "record_id": publish_req.record_id,
         "mode": "commit" if commit else "dry-run",

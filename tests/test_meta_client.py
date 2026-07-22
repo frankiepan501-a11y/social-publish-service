@@ -117,6 +117,32 @@ class MetaClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("post_activity_by_action_type", metrics)
         self.assertNotIn("post_impressions", metrics)
         self.assertNotIn("post_engaged_users", metrics)
+
+    async def test_page_self_reads_linked_instagram_account(self):
+        client = FakeMetaClient(
+            [
+                {
+                    "id": "page-1",
+                    "name": "Powkong",
+                    "instagram_business_account": {"id": "ig-1", "username": "powkong"},
+                }
+            ]
+        )
+
+        result = await client.page_self()
+
+        self.assertEqual(result["instagram_business_account"]["id"], "ig-1")
+        self.assertEqual(client.calls[0][1], "me")
+        self.assertEqual(client.calls[0][2]["params"]["fields"], "id,name,instagram_business_account{id,username}")
+
+    async def test_debug_token_uses_input_token(self):
+        client = FakeMetaClient([{"data": {"is_valid": True}}])
+
+        result = await client.debug_token()
+
+        self.assertTrue(result["data"]["is_valid"])
+        self.assertEqual(client.calls[0][1], "debug_token")
+        self.assertEqual(client.calls[0][2]["params"]["input_token"], "test-token")
 if __name__ == "__main__":
     unittest.main()
 

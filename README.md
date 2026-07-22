@@ -121,10 +121,15 @@ Social CRM P1 publish canary:
   - Dry-run can validate one record without social-platform writes.
   - Commit is blocked unless all of these are true: request has `canary=true`, request has `source=manual`, the mapped record has `真实发布授权时间` or `真实发布授权=true`, `SOCIAL_CRM_P1_PUBLISH_ENABLED=true`, and the existing global `SOCIAL_PUBLISH_COMMIT_ENABLED=true`.
   - The endpoint is single-record only. It does not scan a table and must not be connected to a cron node for commit.
+  - Meta records run a Page-token preflight before any real social-platform write. The response shows token type, scope list, Page/IG ID suffixes, content-publishing quota, and explicit blockers such as wrong Page ID or missing IG User ID. It does not return raw tokens or authorization headers.
   - The response includes `social_crm_p1.writeback_hint`, so n8n can write `dry-run 结果` and `发后回读链接` back to the CRM table after a separate human-approved workflow step.
 - Field mapping accepts the P1 working-table names `草稿状态`, `审批结果`, `最终素材确认`, `发帖文案`, `话题标签`, `图片URL` / `发布图片URL`, `计划发布时间`, and maps account handles like `@powkong_official` to the existing account names `POWKONG IG` / `POWKONG FB` / `FUNLAB IG` / `FUNLAB FB` when brand and platform are present.
 
 Operational fixes:
+- 2026-07-23 Social CRM P1 Meta Page-token preflight:
+  - Problem: after Meta account recovery, Page tokens could pass basic `/me` checks while P1 publish still had no clear single-record explanation for wrong Page/IG mapping, missing IG User ID, or content-publishing quota failures before commit.
+  - Fix: `/social-crm-p1/publish/dry-run` and `/social-crm-p1/publish/commit` now run a Meta Page-token preflight for FB/IG records before any real platform write. Commit is blocked before asset preparation or publishing if the token points to the wrong Page, cannot read the target IG account, or cannot read the IG publishing limit. Dry-run returns the same sanitized preflight result for operator review.
+  - Verification: targeted `tests.test_meta_client tests.test_social_crm_p1` passed 18 tests; full local `unittest discover -s tests -v` passed 148 tests with `SOCIAL_PUBLISH_API_TOKEN` cleared and `GENERATION_AI_PROVIDER=template`.
 - 2026-07-22 Social CRM P1 publish canary adapter:
   - Problem: P0 had account status and post sync, but the first real-publish path still required callers to know the older FB/IG content-calendar schema and could be miswired into broad `/publish/scan` behavior.
   - Fix: added `/social-crm-p1/publish/dry-run` and `/social-crm-p1/publish/commit`, a CRM-to-publish field mapper, and a second P1 publish gate `SOCIAL_CRM_P1_PUBLISH_ENABLED`. Commit is canary-only, manual-only, authorization-time-required, and still obeys `SOCIAL_PUBLISH_COMMIT_ENABLED`.

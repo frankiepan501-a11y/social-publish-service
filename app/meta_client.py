@@ -36,6 +36,18 @@ class MetaClient:
     async def content_publishing_limit(self, ig_user_id: str) -> dict:
         return await self._request("GET", f"{ig_user_id}/content_publishing_limit")
 
+    async def debug_token(self, input_token: str | None = None) -> dict:
+        return await self._request("GET", "debug_token", params={"input_token": input_token or self._access_token})
+
+    async def page_self(self, *, include_instagram: bool = True) -> dict:
+        fields = "id,name"
+        if include_instagram:
+            fields += ",instagram_business_account{id,username}"
+        return await self._request("GET", "me", params={"fields": fields})
+
+    async def instagram_user_basic(self, ig_user_id: str) -> dict:
+        return await self._request("GET", ig_user_id, params={"fields": "id,username,media_count"})
+
     async def _wait_for_instagram_container(self, creation_id: str) -> dict:
         last_payload: dict = {}
         for attempt in range(1, 11):

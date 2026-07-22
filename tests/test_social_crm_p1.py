@@ -45,6 +45,43 @@ def account_config(**overrides):
     return {"fields": fields}
 
 
+class HealthyMetaClient:
+    def __init__(self, access_token, graph_version):
+        self.access_token = access_token
+        self.graph_version = graph_version
+
+    async def debug_token(self):
+        return {
+            "data": {
+                "is_valid": True,
+                "type": "PAGE",
+                "app_id": "app-1",
+                "profile_id": "page-id",
+                "scopes": [
+                    "instagram_basic",
+                    "instagram_content_publish",
+                    "pages_manage_posts",
+                    "pages_read_engagement",
+                ],
+            }
+        }
+
+    async def page_self(self, *, include_instagram=True):
+        if not include_instagram:
+            raise AssertionError("expected include_instagram=True")
+        return {
+            "id": "page-id",
+            "name": "POWKONG",
+            "instagram_business_account": {"id": "ig-user-id", "username": "powkong"},
+        }
+
+    async def instagram_user_basic(self, ig_user_id):
+        return {"id": ig_user_id, "username": "powkong", "media_count": 12}
+
+    async def content_publishing_limit(self, ig_user_id):
+        return {"data": [{"quota_usage": 0, "config": {"quota_total": 50}}]}
+
+
 class SocialCrmP1MappingTest(unittest.TestCase):
     def test_maps_social_crm_fields_to_publish_record(self):
         mapped = build_social_crm_p1_fields(crm_record()["fields"])
@@ -106,15 +143,26 @@ class SocialCrmP1EndpointTest(unittest.TestCase):
         app.dependency_overrides.clear()
 
     def test_dry_run_reuses_publish_validation(self):
-        resp = self.client.post(
-            "/social-crm-p1/publish/dry-run",
-            json={
-                "record": crm_record(),
-                "account_config": account_config(),
-                "now": "2026-07-01 10:01:00",
-                "canary": True,
-            },
+        app.dependency_overrides[main_module.get_settings] = lambda: Settings(
+            service_token="",
+            meta_access_token_powkong="meta-token",
+            feishu_app_id="",
+            feishu_app_secret="",
+            feishu_bitable_app_id="",
+            feishu_bitable_app_secret="",
+            dry_run_write_logs=False,
         )
+
+        with patch.object(main_module, "MetaClient", HealthyMetaClient):
+            resp = self.client.post(
+                "/social-crm-p1/publish/dry-run",
+                json={
+                    "record": crm_record(),
+                    "account_config": account_config(),
+                    "now": "2026-07-01 10:01:00",
+                    "canary": True,
+                },
+            )
         data = resp.json()
 
         self.assertEqual(200, resp.status_code)
@@ -152,7 +200,6 @@ class SocialCrmP1EndpointTest(unittest.TestCase):
         app.dependency_overrides[main_module.get_settings] = lambda: Settings(
             service_token="",
             meta_access_token="",
-            meta_access_token_powkong="",
             meta_access_token_funlab="",
             feishu_app_id="app",
             feishu_app_secret="secret",
@@ -160,9 +207,12 @@ class SocialCrmP1EndpointTest(unittest.TestCase):
             content_table_id="tbl_content",
             log_table_id="tbl_log",
             dry_run_write_logs=True,
+            meta_access_token_powkong="meta-token",
         )
 
-        with patch.object(main_module, "_feishu", return_value=FailingFeishuClient()):
+        with patch.object(main_module, "_feishu", return_value=FailingFeishuClient()), patch.object(
+            main_module, "MetaClient", HealthyMetaClient
+        ):
             resp = self.client.post(
                 "/social-crm-p1/publish/dry-run",
                 json={
@@ -177,6 +227,117 @@ class SocialCrmP1EndpointTest(unittest.TestCase):
         self.assertEqual(200, resp.status_code)
         self.assertTrue(data["ok"], data)
         self.assertEqual("dry-run-pass", data["status"])
+
+    def test_p1_dry_run_blocks_when_meta_token_is_missing(self):
+        resp = self.client.post(
+            "/social-crm-p1/publish/dry-run",
+            json={
+                "record": crm_record(),
+                "account_config": account_config(),
+                "now": "2026-07-01 10:01:00",
+                "canary": True,
+            },
+        )
+
+        data = resp.json()
+        self.assertEqual(200, resp.status_code)
+        self.assertFalse(data["ok"])
+        self.assertEqual("blocked", data["status"])
+        self.assertIn("META_TOKEN_MISSING", [item["code"] for item in data["blocking"]])
+        self.assertFalse(data["meta_preflight"]["ok"])
+
+    def test_dry_run_returns_meta_preflight_for_page_token(self):
+        app.dependency_overrides[main_module.get_settings] = lambda: Settings(
+            service_token="",
+            meta_access_token_powkong="meta-token",
+            feishu_app_id="",
+            feishu_app_secret="",
+            feishu_bitable_app_id="",
+            feishu_bitable_app_secret="",
+            dry_run_write_logs=False,
+        )
+
+        with patch.object(main_module, "MetaClient", HealthyMetaClient):
+            resp = self.client.post(
+                "/social-crm-p1/publish/dry-run",
+                json={
+                    "record": crm_record(),
+                    "account_config": account_config(),
+                    "now": "2026-07-01 10:01:00",
+                    "canary": True,
+                },
+            )
+
+        data = resp.json()
+        self.assertEqual(200, resp.status_code)
+        self.assertTrue(data["ok"], data)
+        self.assertTrue(data["meta_preflight"]["ok"])
+        self.assertEqual("page-id"[-5:], data["meta_preflight"]["checks"]["page_self"]["page_id_suffix"])
+        self.assertEqual(50, data["meta_preflight"]["ig_limit"]["quota_total"])
+        self.assertNotIn("META_PREFLIGHT_FAILED", [item["code"] for item in data["warnings"]])
+
+    def test_commit_blocks_before_publish_when_page_token_mismatches_account_config(self):
+        class MismatchMetaClient:
+            def __init__(self, access_token, graph_version):
+                self.access_token = access_token
+                self.graph_version = graph_version
+
+            async def debug_token(self):
+                return {
+                    "data": {
+                        "is_valid": True,
+                        "type": "PAGE",
+                        "app_id": "app-1",
+                        "profile_id": "other-page",
+                        "scopes": ["instagram_basic", "instagram_content_publish", "pages_manage_posts"],
+                    }
+                }
+
+            async def page_self(self, *, include_instagram=True):
+                return {
+                    "id": "other-page",
+                    "name": "Other Page",
+                    "instagram_business_account": {"id": "ig-user-id", "username": "powkong"},
+                }
+
+            async def instagram_user_basic(self, ig_user_id):
+                return {"id": ig_user_id, "username": "powkong", "media_count": 12}
+
+            async def content_publishing_limit(self, ig_user_id):
+                return {"data": [{"quota_usage": 0, "config": {"quota_total": 50}}]}
+
+            async def publish_instagram_image(self, ig_user_id, image_url, caption):
+                raise AssertionError("publish_instagram_image should not run when preflight blocks")
+
+        app.dependency_overrides[main_module.get_settings] = lambda: Settings(
+            service_token="",
+            meta_access_token_powkong="meta-token",
+            commit_enabled=True,
+            social_crm_p1_publish_enabled=True,
+            feishu_app_id="",
+            feishu_app_secret="",
+            feishu_bitable_app_id="",
+            feishu_bitable_app_secret="",
+            dry_run_write_logs=False,
+        )
+
+        with patch.object(main_module, "MetaClient", MismatchMetaClient):
+            resp = self.client.post(
+                "/social-crm-p1/publish/commit",
+                json={
+                    "record": crm_record(**{"真实发布授权时间": "2026-07-01 10:00:30"}),
+                    "account_config": account_config(),
+                    "now": "2026-07-01 10:01:00",
+                    "source": "manual",
+                    "canary": True,
+                },
+            )
+
+        data = resp.json()
+        self.assertEqual(200, resp.status_code)
+        self.assertFalse(data["ok"])
+        self.assertEqual("blocked", data["status"])
+        self.assertIn("META_PAGE_ID_MISMATCH", [item["code"] for item in data["blocking"]])
 
 
 class SettingsSocialCrmP1Test(unittest.TestCase):
