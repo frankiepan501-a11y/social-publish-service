@@ -2,7 +2,15 @@ import unittest
 from unittest.mock import patch
 
 from app.config import Settings
-from app.social_crm_p0 import fallback_platform_part, parse_base_v3_records_page, persist_x_tokens_to_zeabur, upsert_rows
+from app.social_crm_p0 import (
+    META_RECORDS,
+    fallback_platform_part,
+    meta_insights_payload,
+    meta_sync,
+    parse_base_v3_records_page,
+    persist_x_tokens_to_zeabur,
+    upsert_rows,
+)
 
 
 class SocialCrmP0FallbackTest(unittest.TestCase):
@@ -14,6 +22,64 @@ class SocialCrmP0FallbackTest(unittest.TestCase):
         self.assertTrue(all(row["内容类型"] == "status_only" for row in rows))
         self.assertEqual(2, len(summaries))
         self.assertTrue(evidence["safe_output"])
+
+
+class SocialCrmP0MetaPayloadTest(unittest.TestCase):
+    def test_meta_insights_payload_uses_inline_public_platform_ids(self):
+        for item in META_RECORDS:
+            payload = meta_insights_payload(item, "7d")
+
+            self.assertEqual(item["record_id"], payload["record_id"])
+            self.assertEqual("7d", payload["window"])
+            fields = payload["record"]["fields"]
+            self.assertEqual(item["brand"], fields["品牌"])
+            self.assertTrue(fields.get("IG Media ID") or fields.get("Meta Page Post ID"))
+
+
+class SocialCrmP0MetaSyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_meta_sync_posts_inline_record_and_keeps_public_content_id(self):
+        calls = []
+
+        async def fake_request_json(method, url, **kwargs):
+            calls.append({"method": method, "url": url, "kwargs": kwargs})
+            if url.endswith("/health"):
+                return {
+                    "ok": True,
+                    "meta_configured": True,
+                    "commit_enabled": False,
+                    "asset_prepare_enabled": False,
+                }
+            body = kwargs["json_body"]
+            fields = body["record"]["fields"]
+            self.assertTrue(fields.get("IG Media ID") or fields.get("Meta Page Post ID"))
+            if fields.get("IG Media ID"):
+                return {
+                    "ok": True,
+                    "status": "insights-fetched",
+                    "data": {
+                        "data": [
+                            {"name": "reach", "values": [{"value": 10}]},
+                            {"name": "likes", "values": [{"value": 1}]},
+                        ]
+                    },
+                }
+            return {"ok": True, "status": "insights-fetched", "data": {"data": []}}
+
+        settings = Settings(service_token="svc", social_crm_meta_service_url="https://meta.example")
+
+        with patch("app.social_crm_p0.request_json", new=fake_request_json):
+            rows, summaries, evidence = await meta_sync(settings, "7d")
+
+        insight_calls = [call for call in calls if call["url"].endswith("/insights/poll")]
+        self.assertEqual(4, len(insight_calls))
+        self.assertEqual(4, len(rows))
+        self.assertEqual(4, len(evidence["records"]))
+        self.assertEqual(
+            [item["platform_content_id"] for item in META_RECORDS],
+            [row["平台内容ID"] for row in rows],
+        )
+        self.assertTrue(all(row["同步状态"] != "blocker" for row in rows))
+        self.assertEqual(4, len(summaries))
 
 
 class FakeBaseClient:

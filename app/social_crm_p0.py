@@ -29,6 +29,8 @@ META_RECORDS = [
         "brand": "POWKONG",
         "platform": "Instagram",
         "record_id": "recvpwugmPPQoK",
+        "platform_content_id": "17891426637569224",
+        "insights_fields": {"品牌": "POWKONG", "IG Media ID": "17891426637569224"},
         "url": "https://www.instagram.com/p/Da2OId8IE10/",
         "account": "@powkong_official",
         "content_type": "image",
@@ -37,6 +39,12 @@ META_RECORDS = [
         "brand": "POWKONG",
         "platform": "Facebook",
         "record_id": "recvpwugPD7xQO",
+        "platform_content_id": "386289564569805_122203872086467548",
+        "insights_fields": {
+            "品牌": "POWKONG",
+            "Meta Page Post ID": "386289564569805_122203872086467548",
+            "FB Photo ID": "122203872062467548",
+        },
         "url": "https://www.facebook.com/photo.php?fbid=122203872062467548&set=a.122097563354467548&type=3",
         "account": "Powkong FB Page",
         "content_type": "page_photo",
@@ -45,6 +53,8 @@ META_RECORDS = [
         "brand": "FUNLAB",
         "platform": "Instagram",
         "record_id": "recvpwuhgKO0XL",
+        "platform_content_id": "17948582283231990",
+        "insights_fields": {"品牌": "FUNLAB", "IG Media ID": "17948582283231990"},
         "url": "https://www.instagram.com/p/Da2ONBxIMjN/",
         "account": "@funlab_official",
         "content_type": "image",
@@ -53,6 +63,12 @@ META_RECORDS = [
         "brand": "FUNLAB",
         "platform": "Facebook",
         "record_id": "recvpwuhI8CpWL",
+        "platform_content_id": "114209778414640_887260454442084",
+        "insights_fields": {
+            "品牌": "FUNLAB",
+            "Meta Page Post ID": "114209778414640_887260454442084",
+            "FB Photo ID": "887260437775419",
+        },
         "url": "https://www.facebook.com/photo.php?fbid=887260437775419&set=a.116671061501031&type=3",
         "account": "FUNLAB FB Page",
         "content_type": "page_photo",
@@ -99,6 +115,16 @@ def safe_int(value: Any) -> int | None:
             return int(float(value))
         except (TypeError, ValueError):
             return None
+
+
+def meta_insights_payload(item: dict[str, Any], window: str) -> dict[str, Any]:
+    fields = dict(item.get("insights_fields") or {})
+    fields.setdefault("品牌", item["brand"])
+    return {
+        "record_id": item["record_id"],
+        "record": {"fields": fields},
+        "window": window,
+    }
 
 
 def compact_error(value: Any, limit: int = 260) -> str:
@@ -227,7 +253,7 @@ async def meta_sync(settings: Settings, window: str) -> tuple[list[dict[str, Any
             "POST",
             f"{settings.social_crm_meta_service_url.rstrip('/')}/insights/poll",
             bearer=settings.service_token,
-            json_body={"record_id": item["record_id"], "window": window},
+            json_body=meta_insights_payload(item, window),
             timeout=90,
         )
         ok = bool(response.get("ok"))
@@ -272,7 +298,7 @@ def meta_row(item: dict[str, Any], checked_at: str, metrics: dict[str, int | Non
         "品牌": item["brand"],
         "平台": item["platform"],
         "账号": item["account"],
-        "平台内容ID": item["record_id"],
+        "平台内容ID": item.get("platform_content_id") or item["record_id"],
         "内容链接": item["url"],
         "发布时间": checked_at,
         "内容类型": item["content_type"],

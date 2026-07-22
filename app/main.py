@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import re
 import secrets
 import uuid
 from typing import Any
@@ -108,10 +109,21 @@ def _platform_id(value: Any) -> str:
         return ""
     return text
 
+
+def _safe_error_text(value: Any, limit: int = 260) -> str:
+    text = str(value or "").replace("\r", " ").replace("\n", " ")
+    text = re.sub(r"access_token=[^&\s]+", "access_token=[redacted]", text, flags=re.I)
+    text = re.sub(r"Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", text, flags=re.I)
+    text = re.sub(r'"access_token"\s*:\s*"[^"]+"', '"access_token":"[redacted]"', text, flags=re.I)
+    text = re.sub(r'"refresh_token"\s*:\s*"[^"]+"', '"refresh_token":"[redacted]"', text, flags=re.I)
+    text = re.sub(r'"client_secret"\s*:\s*"[^"]+"', '"client_secret":"[redacted]"', text, flags=re.I)
+    return text[:limit]
+
+
 def _feishu_writeback_detail(exc: FeishuError) -> dict[str, str]:
     return {
         "code": "FEISHU_WRITEBACK_FAILED",
-        "message": str(exc),
+        "message": _safe_error_text(exc),
     }
 
 
@@ -3271,7 +3283,15 @@ async def insights_poll(
         client = _feishu(settings)
         if client is None:
             raise HTTPException(status_code=503, detail="Feishu env is not configured")
-        record = await client.get_record(settings.content_table_id, req.record_id)
+        try:
+            record = await client.get_record(settings.content_table_id, req.record_id)
+        except FeishuError as exc:
+            return {
+                "ok": False,
+                "status": "blocked",
+                "reason": "FEISHU_RECORD_READ_FAILED",
+                "message": _safe_error_text(exc),
+            }
     fields = record.get("fields", record)
     media_id = _platform_id(fields.get("IG Media ID"))
     post_id = (
