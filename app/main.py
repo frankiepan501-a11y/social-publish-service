@@ -2645,15 +2645,79 @@ async def _execute_generate_scan(req: GenerateScanRequest, settings: Settings) -
         client = _feishu(settings)
         if client is None:
             raise HTTPException(status_code=503, detail="Feishu env is not configured")
-        records = await client.list_records(settings.content_table_id, page_size=200)
+        try:
+            records = await client.list_records(settings.content_table_id, page_size=200)
+        except Exception as exc:
+            reason = f"SCAN_SOURCE_FAILED: {type(exc).__name__}"
+            summary = {
+                "scanned": 0,
+                "selected": 0,
+                "generated": 0,
+                "failed": 1,
+                "write_back": req.write_back,
+                "source": req.source,
+                "force": req.force,
+                "limit": req.limit,
+                "reason": reason,
+            }
+            scan_hash = hashlib.sha256(
+                json.dumps(summary, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+            await _write_log(
+                settings,
+                run_id=scan_run_id,
+                record_id="__scan__",
+                node="generate/scan",
+                status="error",
+                input_hash=scan_hash,
+                output_summary=json.dumps(summary, ensure_ascii=False, default=str),
+                decision_reason=reason,
+                mode="commit" if req.write_back else "dry-run",
+                replay_command=(
+                    'POST /generate/scan '
+                    f'{{"write_back":false,"source":"replay","force":{str(req.force).lower()},"limit":{req.limit}}}'
+                ),
+            )
+            return {
+                "ok": False,
+                "status": "scan-source-failed",
+                "scan_run_id": scan_run_id,
+                "scanned": 0,
+                "selected": 0,
+                "generated": 0,
+                "failed": 1,
+                "write_back": req.write_back,
+                "results": [
+                    {
+                        "ok": False,
+                        "status": "scan-source-failed",
+                        "record_id": "__scan__",
+                        "reason": reason,
+                    }
+                ],
+                "skipped_sample": [],
+            }
 
     selected = []
     skipped = []
+    results = []
     for index, record in enumerate(records):
-        fields = record.get("fields", record)
-        fields = await _enrich_content_fields_with_product_context(fields, settings)
-        ok, reason = generation_candidate_reason(fields, force=req.force)
         record_id = record.get("record_id") or f"inline-{index}"
+        try:
+            fields = record.get("fields", record)
+            fields = await _enrich_content_fields_with_product_context(fields, settings)
+            ok, reason = generation_candidate_reason(fields, force=req.force)
+        except Exception as exc:
+            reason = f"SCAN_RECORD_FAILED: {type(exc).__name__}"
+            failed_item = {
+                "ok": False,
+                "status": "scan-record-failed",
+                "record_id": record_id,
+                "reason": reason,
+            }
+            results.append(failed_item)
+            skipped.append({"record_id": record_id, "reason": reason})
+            continue
         if ok:
             selected.append((record_id, {"record_id": record_id, "fields": fields}))
         else:
@@ -2661,18 +2725,25 @@ async def _execute_generate_scan(req: GenerateScanRequest, settings: Settings) -
         if len(selected) >= req.limit:
             break
 
-    results = []
     for record_id, record in selected:
-        item = await _execute_generate(
-            GenerateBriefRequest(
-                record_id=record_id,
-                record=record,
-                write_back=req.write_back,
-                source=req.source,
-                force=req.force,
-            ),
-            settings=settings,
-        )
+        try:
+            item = await _execute_generate(
+                GenerateBriefRequest(
+                    record_id=record_id,
+                    record=record,
+                    write_back=req.write_back,
+                    source=req.source,
+                    force=req.force,
+                ),
+                settings=settings,
+            )
+        except Exception as exc:
+            item = {
+                "ok": False,
+                "status": "scan-record-failed",
+                "run_id": scan_run_id,
+                "reason": f"SCAN_RECORD_FAILED: {type(exc).__name__}",
+            }
         item["record_id"] = record_id
         results.append(item)
 

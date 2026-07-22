@@ -1080,6 +1080,64 @@ class GenerationRulesTest(unittest.TestCase):
         self.assertIn('"selected": 0', kwargs["output_summary"])
         self.assertIn("POST /generate/scan", kwargs["replay_command"])
 
+    def test_generate_scan_source_failure_returns_structured_error(self):
+        client = TestClient(app)
+        feishu = AsyncMock()
+        feishu.list_records.side_effect = RuntimeError("source down")
+        with patch.object(main_module, "_feishu", return_value=feishu), patch.object(
+            main_module, "_write_log", new_callable=AsyncMock
+        ) as write_log:
+            resp = client.post(
+                "/generate/scan",
+                json={"write_back": False, "source": "replay", "limit": 3},
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["status"], "scan-source-failed")
+        self.assertEqual(body["failed"], 1)
+        self.assertEqual(body["results"][0]["record_id"], "__scan__")
+        self.assertIn("SCAN_SOURCE_FAILED: RuntimeError", body["results"][0]["reason"])
+        write_log.assert_awaited_once()
+
+    def test_generate_scan_candidate_exception_is_record_scoped(self):
+        client = TestClient(app)
+        with patch.object(main_module, "_write_log", new_callable=AsyncMock), patch.object(
+            main_module,
+            "_enrich_content_fields_with_product_context",
+            new_callable=AsyncMock,
+        ) as enrich:
+            enrich.side_effect = RuntimeError("bad product")
+            resp = client.post(
+                "/generate/scan",
+                json={"records": [{"record_id": "rec_bad", "fields": fields()}], "write_back": False},
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["selected"], 0)
+        self.assertEqual(body["failed"], 1)
+        self.assertEqual(body["results"][0]["record_id"], "rec_bad")
+        self.assertIn("SCAN_RECORD_FAILED: RuntimeError", body["results"][0]["reason"])
+
+    def test_generate_scan_generate_exception_is_record_scoped(self):
+        client = TestClient(app)
+        with patch.object(main_module, "_write_log", new_callable=AsyncMock), patch.object(
+            main_module, "_execute_generate", new_callable=AsyncMock
+        ) as execute_generate:
+            execute_generate.side_effect = RuntimeError("bad generate")
+            resp = client.post(
+                "/generate/scan",
+                json={"records": [{"record_id": "rec_bad", "fields": fields()}], "write_back": False},
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["selected"], 1)
+        self.assertEqual(body["failed"], 1)
+        self.assertEqual(body["results"][0]["record_id"], "rec_bad")
+        self.assertIn("SCAN_RECORD_FAILED: RuntimeError", body["results"][0]["reason"])
+
     def test_write_log_respects_dry_run_log_gate(self):
         settings = Settings(feishu_app_id="app", feishu_app_secret="secret", dry_run_write_logs=False)
         feishu = AsyncMock()
