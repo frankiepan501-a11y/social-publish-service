@@ -2953,6 +2953,7 @@ async def health(settings: Settings = Depends(get_settings)):
         "social_crm_p0_write_enabled": settings.social_crm_p0_write_enabled,
         "social_crm_p0_youtube_configured": settings.social_crm_p0_youtube_enabled(),
         "social_crm_p0_x_configured": settings.social_crm_p0_x_enabled(),
+        "social_crm_p0_x_durable_persist_configured": settings.social_crm_p0_x_durable_persist_enabled(),
         "social_crm_p1_publish_configured": settings.social_crm_p1_publish_configured(),
         "social_crm_p1_publish_enabled": settings.social_crm_p1_publish_enabled,
         "social_crm_p1_canary_only": True,

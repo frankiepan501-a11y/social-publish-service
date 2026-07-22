@@ -548,6 +548,92 @@ def persist_x_tokens(settings: Settings, tokens: dict[str, Any]) -> None:
         return
 
 
+def x_token_env_key(settings: Settings, brand: str) -> str:
+    if brand == "FUNLAB":
+        return settings.social_crm_x_token_funlab_env_key
+    if brand == "POWKONG":
+        return settings.social_crm_x_token_powkong_env_key
+    raise SocialCrmSyncError(f"unknown X brand for env persistence: {brand}")
+
+
+async def zeabur_graphql(settings: Settings, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+    headers = {
+        "Authorization": f"Bearer {settings.social_crm_x_zeabur_api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "social-publish-service",
+    }
+    payload = {"query": query, "variables": variables}
+    async with httpx.AsyncClient(timeout=45) as client:
+        resp = await client.post(settings.social_crm_x_zeabur_graphql_url, json=payload, headers=headers)
+    try:
+        body = resp.json() if resp.content else {}
+    except json.JSONDecodeError:
+        body = {"message": resp.text[:500]}
+    if resp.status_code >= 400 or body.get("errors"):
+        raise SocialCrmSyncError("Zeabur env persist failed: " + compact_error(body))
+    data = body.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+async def zeabur_upsert_env(settings: Settings, key: str, value: str) -> str:
+    variables = {
+        "sid": settings.social_crm_x_zeabur_service_id,
+        "eid": settings.social_crm_x_zeabur_environment_id,
+        "oldKey": key,
+        "newKey": key,
+        "value": value,
+    }
+    update_query = (
+        "mutation($sid:ObjectID!,$eid:ObjectID!,$oldKey:String!,$newKey:String!,$value:String!){"
+        " updateSingleEnvironmentVariable(serviceID:$sid,environmentID:$eid,oldKey:$oldKey,newKey:$newKey,value:$value){ key }"
+        "}"
+    )
+    try:
+        await zeabur_graphql(settings, update_query, variables)
+        return "updated"
+    except SocialCrmSyncError as exc:
+        message = str(exc)
+        if "VARIABLE_NOT_FOUND" not in message and "not found" not in message.lower():
+            raise
+
+    create_query = (
+        "mutation($sid:ObjectID!,$eid:ObjectID!,$key:String!,$value:String!){"
+        " createEnvironmentVariable(serviceID:$sid,environmentID:$eid,key:$key,value:$value){ key }"
+        "}"
+    )
+    await zeabur_graphql(
+        settings,
+        create_query,
+        {
+            "sid": settings.social_crm_x_zeabur_service_id,
+            "eid": settings.social_crm_x_zeabur_environment_id,
+            "key": key,
+            "value": value,
+        },
+    )
+    return "created"
+
+
+async def persist_x_tokens_to_zeabur(settings: Settings, tokens: dict[str, Any]) -> tuple[list[str], list[str]]:
+    updated: list[str] = []
+    errors: list[str] = []
+    if not tokens:
+        return updated, errors
+    if not settings.social_crm_x_zeabur_env_persist_enabled:
+        return updated, errors
+    if not settings.social_crm_p0_x_durable_persist_enabled():
+        return updated, ["Zeabur env persistence is enabled but required Zeabur config is missing"]
+    for brand, token_json in tokens.items():
+        try:
+            key = x_token_env_key(settings, brand)
+            action = await zeabur_upsert_env(settings, key, token_json)
+            updated.append(f"{brand}:{action}")
+        except Exception as exc:
+            errors.append(f"{brand}: {compact_error(exc)}")
+    return updated, errors
+
+
 async def x_sync(settings: Settings) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     checked_at = format_datetime()
     persisted = read_persisted_x_tokens(settings)
@@ -592,10 +678,15 @@ async def x_sync(settings: Settings) -> tuple[list[dict[str, Any]], list[dict[st
     if changed_tokens:
         merged = {**persisted, **changed_tokens}
         persist_x_tokens(settings, merged)
+    durable_updated, durable_errors = await persist_x_tokens_to_zeabur(settings, changed_tokens)
     evidence["token_persistence"] = {
-        "mode": "runtime_file",
+        "mode": "runtime_file+zeabur_env" if settings.social_crm_x_zeabur_env_persist_enabled else "runtime_file",
         "persist_path_configured": bool(settings.social_crm_x_token_persist_path),
         "updated_brands": sorted(changed_tokens.keys()),
+        "zeabur_env_enabled": settings.social_crm_x_zeabur_env_persist_enabled,
+        "zeabur_env_configured": settings.social_crm_p0_x_durable_persist_enabled(),
+        "zeabur_env_updated": durable_updated,
+        "zeabur_env_errors": durable_errors,
     }
     return rows, build_platform_summaries(rows, "cloud:social-crm-p0"), evidence
 

@@ -1,6 +1,8 @@
 import unittest
+from unittest.mock import patch
 
-from app.social_crm_p0 import fallback_platform_part, parse_base_v3_records_page, upsert_rows
+from app.config import Settings
+from app.social_crm_p0 import fallback_platform_part, parse_base_v3_records_page, persist_x_tokens_to_zeabur, upsert_rows
 
 
 class SocialCrmP0FallbackTest(unittest.TestCase):
@@ -64,6 +66,46 @@ class SocialCrmP0BaseV3ParseTest(unittest.TestCase):
         self.assertEqual("rec1", records[0]["record_id"])
         self.assertEqual("key1", records[0]["fields"]["同步键"])
         self.assertEqual(["POWKONG"], records[1]["fields"]["品牌"])
+
+
+class SocialCrmP0XZeaburPersistTest(unittest.IsolatedAsyncioTestCase):
+    async def test_persist_x_tokens_writes_expected_env_keys(self):
+        calls = []
+
+        async def fake_upsert(settings, key, value):
+            calls.append((key, value))
+            return "updated"
+
+        settings = Settings(
+            social_crm_x_zeabur_env_persist_enabled=True,
+            social_crm_x_zeabur_api_key="key",
+            social_crm_x_zeabur_service_id="service",
+            social_crm_x_zeabur_environment_id="env",
+        )
+
+        with patch("app.social_crm_p0.zeabur_upsert_env", new=fake_upsert):
+            updated, errors = await persist_x_tokens_to_zeabur(
+                settings,
+                {"FUNLAB": '{"brand":"funlab"}', "POWKONG": '{"brand":"powkong"}'},
+            )
+
+        self.assertEqual([], errors)
+        self.assertEqual(["FUNLAB:updated", "POWKONG:updated"], updated)
+        self.assertEqual(
+            [
+                ("SOCIAL_CRM_X_TOKEN_FUNLAB_JSON", '{"brand":"funlab"}'),
+                ("SOCIAL_CRM_X_TOKEN_POWKONG_JSON", '{"brand":"powkong"}'),
+            ],
+            calls,
+        )
+
+    async def test_persist_x_tokens_reports_missing_zeabur_config(self):
+        settings = Settings(social_crm_x_zeabur_env_persist_enabled=True)
+
+        updated, errors = await persist_x_tokens_to_zeabur(settings, {"FUNLAB": "{}"})
+
+        self.assertEqual([], updated)
+        self.assertEqual(["Zeabur env persistence is enabled but required Zeabur config is missing"], errors)
 
 
 if __name__ == "__main__":

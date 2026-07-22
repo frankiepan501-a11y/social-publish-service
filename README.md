@@ -108,7 +108,7 @@ Social CRM P0 sync:
 - Default request for n8n cron: `{"commit":true,"source":"auto","window":"7d"}`. Use `skip_meta`, `skip_youtube`, or `skip_x` to isolate one platform during smoke tests.
 - Meta: reuses this service's existing Meta environment and calls `/insights/poll` internally for the known P0 record samples.
 - YouTube: uses OAuth token JSON stored in Zeabur environment variables. It refreshes access tokens in memory for each run and reads channel, recent videos, and basic analytics only.
-- X: uses OAuth 2.0 user-context credentials stored in Zeabur environment variables. It refreshes access tokens, reads user identity and recent original posts, and retries short-lived 429/5xx errors. Rotated token JSON is persisted only to the runtime path `SOCIAL_CRM_X_TOKEN_PERSIST_PATH`; move it to a durable secret store later if daily jobs must survive container rebuilds without reusing the original refresh token.
+- X: uses OAuth 2.0 user-context credentials stored in Zeabur environment variables. It refreshes access tokens, reads user identity and recent original posts, and retries short-lived 429/5xx errors. Rotated token JSON is first persisted to the runtime path `SOCIAL_CRM_X_TOKEN_PERSIST_PATH`; when `SOCIAL_CRM_X_ZEABUR_ENV_PERSIST_ENABLED=true`, the same rotated JSON is also written back to the Zeabur environment variables named by `SOCIAL_CRM_X_TOKEN_FUNLAB_ENV_KEY` / `SOCIAL_CRM_X_TOKEN_POWKONG_ENV_KEY` so container rebuilds can start from the newest refresh tokens.
 - Feishu Base writeback: P0 uses the Feishu 1号 app as the Base writing identity because it already has the newer Base scopes and has been added as an edit collaborator on `Social CRM P0 工作台`. The older 2号 Bitable app still lacks these new scopes and should not be used for this P0 endpoint until it is republished with `base:field:read`, `base:record:read`, `base:record:create`, and `base:record:update`.
 - Do not put token values, client secrets, passwords, or authorization headers into Base, README, n8n node notes, or execution logs.
 
@@ -245,6 +245,13 @@ Required environment for production:
 - `SOCIAL_CRM_X_CLIENT_POWKONG_JSON`
 - `SOCIAL_CRM_X_TOKEN_POWKONG_JSON`
 - `SOCIAL_CRM_X_TOKEN_PERSIST_PATH`
+- `SOCIAL_CRM_X_ZEABUR_ENV_PERSIST_ENABLED` (`true` writes rotated X token JSON back to Zeabur env after each sync)
+- `SOCIAL_CRM_X_ZEABUR_API_KEY`
+- `SOCIAL_CRM_X_ZEABUR_SERVICE_ID`
+- `SOCIAL_CRM_X_ZEABUR_ENVIRONMENT_ID`
+- `SOCIAL_CRM_X_ZEABUR_GRAPHQL_URL` (optional; defaults to `https://api.zeabur.com/graphql`)
+- `SOCIAL_CRM_X_TOKEN_FUNLAB_ENV_KEY` (optional; defaults to `SOCIAL_CRM_X_TOKEN_FUNLAB_JSON`)
+- `SOCIAL_CRM_X_TOKEN_POWKONG_ENV_KEY` (optional; defaults to `SOCIAL_CRM_X_TOKEN_POWKONG_JSON`)
 - `SOCIAL_CRM_P1_PUBLISH_ENABLED` (`false` by default; required in addition to `SOCIAL_PUBLISH_COMMIT_ENABLED` for Social CRM P1 canary commits)
 
 Local check:

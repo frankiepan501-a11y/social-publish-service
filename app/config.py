@@ -61,6 +61,13 @@ class Settings:
     social_crm_x_client_powkong_json: str = os.getenv("SOCIAL_CRM_X_CLIENT_POWKONG_JSON", "")
     social_crm_x_token_powkong_json: str = os.getenv("SOCIAL_CRM_X_TOKEN_POWKONG_JSON", "")
     social_crm_x_token_persist_path: str = os.getenv("SOCIAL_CRM_X_TOKEN_PERSIST_PATH", "/tmp/social_crm_x_tokens.json")
+    social_crm_x_zeabur_env_persist_enabled: bool = env_bool("SOCIAL_CRM_X_ZEABUR_ENV_PERSIST_ENABLED", False)
+    social_crm_x_zeabur_api_key: str = os.getenv("SOCIAL_CRM_X_ZEABUR_API_KEY", "")
+    social_crm_x_zeabur_service_id: str = os.getenv("SOCIAL_CRM_X_ZEABUR_SERVICE_ID", "")
+    social_crm_x_zeabur_environment_id: str = os.getenv("SOCIAL_CRM_X_ZEABUR_ENVIRONMENT_ID", "")
+    social_crm_x_zeabur_graphql_url: str = os.getenv("SOCIAL_CRM_X_ZEABUR_GRAPHQL_URL", "https://api.zeabur.com/graphql")
+    social_crm_x_token_funlab_env_key: str = os.getenv("SOCIAL_CRM_X_TOKEN_FUNLAB_ENV_KEY", "SOCIAL_CRM_X_TOKEN_FUNLAB_JSON")
+    social_crm_x_token_powkong_env_key: str = os.getenv("SOCIAL_CRM_X_TOKEN_POWKONG_ENV_KEY", "SOCIAL_CRM_X_TOKEN_POWKONG_JSON")
     social_crm_p1_publish_enabled: bool = env_bool("SOCIAL_CRM_P1_PUBLISH_ENABLED", False)
 
     generation_ai_provider: str = os.getenv("GENERATION_AI_PROVIDER", "template")
@@ -117,6 +124,14 @@ class Settings:
             and self.social_crm_x_token_funlab_json
             and self.social_crm_x_client_powkong_json
             and self.social_crm_x_token_powkong_json
+        )
+
+    def social_crm_p0_x_durable_persist_enabled(self) -> bool:
+        return bool(
+            self.social_crm_x_zeabur_env_persist_enabled
+            and self.social_crm_x_zeabur_api_key
+            and self.social_crm_x_zeabur_service_id
+            and self.social_crm_x_zeabur_environment_id
         )
 
     def social_crm_p1_publish_configured(self) -> bool:
