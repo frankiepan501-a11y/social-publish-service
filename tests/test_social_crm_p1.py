@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -139,6 +140,43 @@ class SocialCrmP1EndpointTest(unittest.TestCase):
         self.assertFalse(data["ok"])
         self.assertEqual("blocked", data["status"])
         self.assertIn("P1_PUBLISH_DISABLED", [item["code"] for item in data["blocking"]])
+
+    def test_dry_run_survives_feishu_recent_and_log_failures(self):
+        class FailingFeishuClient:
+            async def list_records(self, table_id, page_size=200):
+                raise RuntimeError("legacy content table unavailable")
+
+            async def append_run_log(self, table_id, **kwargs):
+                raise RuntimeError("log table unavailable")
+
+        app.dependency_overrides[main_module.get_settings] = lambda: Settings(
+            service_token="",
+            meta_access_token="",
+            meta_access_token_powkong="",
+            meta_access_token_funlab="",
+            feishu_app_id="app",
+            feishu_app_secret="secret",
+            feishu_base_token="base",
+            content_table_id="tbl_content",
+            log_table_id="tbl_log",
+            dry_run_write_logs=True,
+        )
+
+        with patch.object(main_module, "_feishu", return_value=FailingFeishuClient()):
+            resp = self.client.post(
+                "/social-crm-p1/publish/dry-run",
+                json={
+                    "record": crm_record(),
+                    "account_config": account_config(),
+                    "now": "2026-07-01 10:01:00",
+                    "canary": True,
+                },
+            )
+
+        data = resp.json()
+        self.assertEqual(200, resp.status_code)
+        self.assertTrue(data["ok"], data)
+        self.assertEqual("dry-run-pass", data["status"])
 
 
 class SettingsSocialCrmP1Test(unittest.TestCase):

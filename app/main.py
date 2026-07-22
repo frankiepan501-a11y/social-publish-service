@@ -424,7 +424,10 @@ async def _load_recent_records(req: PublishRequest, settings: Settings) -> list[
     client = _feishu(settings)
     if client is None:
         return []
-    return await client.list_records(settings.content_table_id, page_size=200)
+    try:
+        return await client.list_records(settings.content_table_id, page_size=200)
+    except Exception:
+        return []
 
 
 async def _write_log(settings: Settings, **kwargs) -> None:
@@ -435,7 +438,7 @@ async def _write_log(settings: Settings, **kwargs) -> None:
         return
     try:
         await client.append_run_log(settings.log_table_id, **kwargs)
-    except FeishuError:
+    except Exception:
         # Logging failure must not hide the dry-run/commit decision.
         return
 
